@@ -63,6 +63,10 @@ pub struct PauseConfig {
     pub object_id: Option<sui_sdk_types::Address>,
     /// The validators the monitor votes for, each with a funded operator key.
     pub operators: Vec<PauseOperator>,
+    /// Esplora API of an independent Bitcoin source, such as
+    /// `https://mempool.space/api`. A fresh deposit approval that neither it
+    /// nor the monitor's node shows paid in time is unbacked.
+    pub bitcoin_api_url: String,
     /// Pause Hashi when a finding that autopauses is reported.
     #[serde(default)]
     pub autopause: bool,

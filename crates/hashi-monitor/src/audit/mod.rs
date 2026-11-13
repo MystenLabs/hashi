@@ -694,7 +694,7 @@ mod tests {
         let unbacked = auditor.ingest(MonitorEvent::DepositApproved(sui.clone()));
         assert!(matches!(
             &unbacked[..],
-            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+            [MonitorFinding::DepositUnbacked { sui: unbacked, .. }] if *unbacked == sui
         ));
 
         assert!(
@@ -828,7 +828,7 @@ mod tests {
 
         assert!(matches!(
             &findings[..],
-            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+            [MonitorFinding::DepositUnbacked { sui: unbacked, .. }] if *unbacked == sui
         ));
         assert!(auditor.gc_and_update_pool().is_empty());
         assert!(auditor.utxo_pool.is_empty());
@@ -941,7 +941,13 @@ mod tests {
 
         assert!(late.is_essential());
         assert!(!stalled.is_essential());
-        assert!(MonitorFinding::DepositUnbacked { sui }.is_essential());
+        assert!(
+            MonitorFinding::DepositUnbacked {
+                sui,
+                reason: crate::findings::DepositUnbackedReason::NotFound
+            }
+            .is_essential()
+        );
     }
 
     #[tokio::test]

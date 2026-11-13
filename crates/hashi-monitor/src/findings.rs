@@ -137,6 +137,19 @@ pub enum DepositMismatchReason {
     },
 }
 
+/// Why an approved deposit counts as unbacked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DepositUnbackedReason {
+    /// The monitor's node or the reference source shows the output spent
+    /// before the mint.
+    Spent,
+    /// Neither source verified the payment by `FRESH_APPROVAL_DEADLINE`.
+    Unverified,
+    /// The monitor's node alone does not find the payment. A node that peers
+    /// withhold blocks from gives this too, so it does not autopause.
+    NotFound,
+}
+
 /// Findings emitted by the monitor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorFinding {
@@ -177,8 +190,11 @@ pub enum MonitorFinding {
     // E3: `SuiDepositApprovedEvent`, the Hashi approval on Sui.
     // ========================================================================
     /// E3 without E2: Hashi approved a deposit, but its outpoint holds no
-    /// unspent Bitcoin output.
-    DepositUnbacked { sui: SuiDepositApprovedEvent },
+    /// unspent Bitcoin output. See `DepositUnbackedReason`.
+    DepositUnbacked {
+        sui: SuiDepositApprovedEvent,
+        reason: DepositUnbackedReason,
+    },
     /// Two events of one deposit request disagree. See
     /// `DepositMismatchReason`.
     DepositMismatch {
@@ -337,14 +353,21 @@ impl MonitorFinding {
     /// Whether the finding pauses Hashi when autopause is armed.
     pub fn autopauses(&self) -> bool {
         match self {
-            Self::DepositUnbacked { .. }
+            Self::DepositUnbacked {
+                reason: DepositUnbackedReason::Spent | DepositUnbackedReason::Unverified,
+                ..
+            }
             | Self::DepositMismatch {
                 reason: DepositMismatchReason::PaymentDiffers { .. },
                 ..
             }
             | Self::WithdrawalUnapproved { .. }
             | Self::UtxoUnexpectedSpend { .. } => true,
-            Self::DepositMismatch {
+            Self::DepositUnbacked {
+                reason: DepositUnbackedReason::NotFound,
+                ..
+            }
+            | Self::DepositMismatch {
                 reason:
                     DepositMismatchReason::ApprovalDiffers { .. }
                     | DepositMismatchReason::RequestDiffers { .. },
@@ -592,9 +615,9 @@ impl fmt::Display for MonitorFinding {
             Self::WithdrawalInvalid { wid, reason } => {
                 write!(f, "WithdrawalInvalid(wid={wid}, {reason})")
             }
-            Self::DepositUnbacked { sui } => write!(
+            Self::DepositUnbacked { sui, reason } => write!(
                 f,
-                "DepositUnbacked({})",
+                "DepositUnbacked({reason:?}, {})",
                 MonitorEvent::DepositApproved(sui.clone()),
             ),
             Self::DepositLate {

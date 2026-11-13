@@ -26,6 +26,7 @@ use crate::metrics::SOURCE_SUI;
 use crate::rpc::PollCursor;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::btc::checked_confirmation_threshold;
+use crate::rpc::esplora::EsploraClient;
 use crate::rpc::guardian::GuardianCursor;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiPoller;
@@ -48,6 +49,8 @@ pub struct RpcPollers {
     pub guardian_poller: GuardianWithdrawalsPoller,
     pub sui_poller: SuiPoller,
     pub btc_client: BtcRpcClient,
+    /// The reference Bitcoin source, from the pause config.
+    pub reference_btc: Option<EsploraClient>,
     /// When the last full Bitcoin pass started. It starts at the startup
     /// time. Thus a Bitcoin node that is down at startup becomes stale only
     /// after `SOURCE_STALE_LIMIT`.
@@ -83,6 +86,10 @@ impl RpcPollers {
             guardian_poller,
             sui_poller,
             btc_client: BtcRpcClient::new(cfg, confirmations, SOURCE_STALE_LIMIT)?,
+            reference_btc: cfg
+                .pause
+                .as_ref()
+                .map(|pause| EsploraClient::new(&pause.bitcoin_api_url, confirmations)),
             btc_checked_through: now_timestamp_secs(),
             deposit_delay_secs: settings.deposit_delay_secs,
         })
@@ -214,10 +221,13 @@ impl Auditor {
     /// Returns domain findings and bubbles up infra errors. `started_at` is
     /// taken before the lookups, so the machines record it as their check time.
     fn fetch_btc_info(&mut self, started_at: UnixSeconds) -> anyhow::Result<Vec<MonitorFinding>> {
-        let tip_height = self.rpc_pollers.btc_client.synced_height()?;
+        let tip_height = self.rpc_pollers.btc_client.synced_height();
+        // Before the node's sync check can fail the tick: a node that peers
+        // withhold blocks from fails it, and the reference source still checks.
         // Report now, so that a later error in this tick does not lose them.
-        let fresh = self.check_fresh_approvals(tip_height, started_at)?;
+        let fresh = self.check_fresh_approvals(tip_height.as_ref().ok().copied(), started_at);
         self.report_findings("btc", &fresh);
+        let tip_height = tip_height?;
         // A "not confirmed yet" answer goes stale. A confirmed one is kept
         // until no flow names its txid.
         self.rpc_pollers.btc_client.forget_unconfirmed();
@@ -341,6 +351,7 @@ impl RpcPollers {
             sui_poller: poller_scanned(timestamp),
             btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS, SOURCE_STALE_LIMIT)
                 .unwrap(),
+            reference_btc: None,
             btc_checked_through: timestamp,
             deposit_delay_secs: 600,
         }

@@ -467,6 +467,7 @@ impl UtxoPool {
 mod tests {
     use super::*;
     use crate::findings::DepositMismatchReason;
+    use crate::findings::DepositUnbackedReason;
 
     use bitcoin::Amount;
     use bitcoin::ScriptBuf;
@@ -805,7 +806,10 @@ mod tests {
         let sui = sui_approval(1, 1_000, script());
         assert_eq!(
             pool.check_sui_approval(&sui, SKEW),
-            vec![MonitorFinding::DepositUnbacked { sui }]
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                reason: DepositUnbackedReason::NotFound
+            }]
         );
     }
 
@@ -815,7 +819,13 @@ mod tests {
 
         let sui = sui_approval(2, 1_000, script());
         let findings = pool.check_sui_approval(&sui, SKEW);
-        assert_eq!(findings, vec![MonitorFinding::DepositUnbacked { sui }]);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                reason: DepositUnbackedReason::NotFound
+            }]
+        );
     }
 
     #[test]
@@ -830,7 +840,10 @@ mod tests {
         };
         assert_eq!(
             pool.check_sui_approval(&sui, SKEW),
-            vec![MonitorFinding::DepositUnbacked { sui }]
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                reason: DepositUnbackedReason::NotFound
+            }]
         );
     }
 

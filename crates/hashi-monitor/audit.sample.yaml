@@ -67,5 +67,7 @@ btc:
 #   operators:
 #     - validator_address: "0x0000000000000000000000000000000000000000000000000000000000000000"
 #       key_path: "/path/to/operator.key"
+#   # Esplora API of an independent Bitcoin source.
+#   bitcoin_api_url: "https://mempool.space/signet/api"
 #   # Pause the bridge when a finding that autopauses is reported.
 #   autopause: true

@@ -1,52 +1,50 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The auditor checks that each fresh deposit approval names an unspent outpoint.
+//! The auditor checks that each fresh deposit approval names a paid,
+//! unspent outpoint, on the monitor's node and on a reference source.
 //!
 //! Why it exists:
 //! - A fresh approval is a Sui deposit approval whose delay ends more than
 //!   `DELAY_END_MARGIN` from now. The delay is Move's minimum time from an
 //!   approval to its mint (`bitcoin_deposit_time_delay_ms`).
-//! - The deposit judge proves that Bitcoin paid the outpoint. It does not
-//!   check that the outpoint is unspent now.
 //! - Move refuses only the outpoints that it tracks. A dishonest committee
-//!   can spend an untracked bridge output through the recovery leaf, then
-//!   approve a deposit of it. The mint is then unbacked.
-//! - The daily pool check finds this spend, but only after the mint. This
-//!   check finds it during the delay, so operators can pause Hashi.
+//!   can approve a deposit that Bitcoin never paid, or spend an untracked
+//!   bridge output through the recovery leaf, then approve a deposit of it.
+//! - Whoever controls the peers of the monitor's node can withhold blocks
+//!   from it, so an honest payment looks missing there. The reference source
+//!   (see `rpc::esplora`) has other peers.
 //!
-//! How it works:
-//! 1. On ingest, keep each fresh approval.
-//! 2. At each Bitcoin tick, drop the approvals that are no longer fresh.
-//! 3. Look up the outpoints of the remaining approvals. A spend in the
-//!    mempool counts. When the lookup returns, drop the approvals that are
-//!    no longer fresh, because a slow lookup can see a spend after the mint.
-//! 4. Report a spent outpoint as `DepositUnbacked`, and drop its approval.
-//! 5. Drop an approval whose outpoint is unspent. One lookup is sufficient:
-//!    an attacker gains nothing from a spend before the mint over a spend
-//!    after it.
-//! 6. Keep an approval whose outpoint Bitcoin does not show yet, because the
-//!    monitor's node can be behind. The next tick looks it up again.
+//! How it works, at each Bitcoin tick, even when the node fails its sync check:
+//! 1. Drop the approvals that are no longer fresh, before and after the
+//!    lookups, because a slow lookup can see an honest spend after the mint.
+//! 2. Look up the rest on both sources. A source that fails answers nothing.
+//! 3. Either source showing the outpoint spent, also in the mempool, is
+//!    `DepositUnbacked` (`Spent`). Withholding blocks cannot fake a spend.
+//! 4. Either source showing it paid as approved verifies it. One lookup is
+//!    sufficient: an attacker gains nothing from a spend before the mint
+//!    over a spend after it.
+//! 5. Neither source showing it paid `FRESH_APPROVAL_DEADLINE` after the
+//!    approval is `DepositUnbacked` (`Unverified`).
 //!
 //! Assumptions:
-//! - An honest deposit UTXO joins Move's active pool at `confirm_deposit`,
-//!   when its delay ends or later. Withdrawals spend only active UTXOs. So no
-//!   honest transaction spends the outpoint before its delay ends, not even
-//!   in the mempool.
-//! - `DELAY_END_MARGIN` covers lookup time and clock skew between the
-//!   monitor and Sui, so a lookup never sees an honest spend after the mint.
-//! - An approval that the monitor reads when it is no longer fresh skips
-//!   this check. The daily pool check covers it. With a delay shorter than
-//!   `DELAY_END_MARGIN`, no approval is fresh.
-//! - The snapshot does not keep the approvals, because a restart usually
-//!   takes longer than the delay.
-//! - A spend after the delay ends is out of scope. It is the same as a
-//!   recovery spend of any held UTXO, which the daily pool check reports.
+//! - An honest deposit is confirmed when Hashi approves it, so a working
+//!   source shows it paid at the first lookup. Both sources failing until the
+//!   deadline gives a false `Unverified`.
+//! - The deposit judge reports a node payment of another amount or script.
+//! - No honest transaction spends a deposit outpoint before its delay ends:
+//!   it joins Move's active pool at `confirm_deposit`.
+//! - The snapshot does not keep the approvals. After a restart, the catch-up
+//!   reads the fresh ones again, and their deadlines count from the approval.
+//! - An approval read after it stopped being fresh skips this check. The
+//!   daily pool check covers it.
 
 use super::Auditor;
 use crate::domain::SuiDepositApprovedEvent;
+use crate::findings::DepositUnbackedReason;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::OutpointState;
+use crate::rpc::esplora::ReferenceOutput;
 use bitcoin::OutPoint;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
@@ -54,6 +52,10 @@ use std::collections::HashMap;
 
 /// How long before the delay ends the lookups stop, in seconds.
 const DELAY_END_MARGIN: u64 = 2 * 60;
+
+/// How long after an approval a source must show its payment, in seconds. It
+/// leaves most of Move's ten-minute delay for the pause.
+const FRESH_APPROVAL_DEADLINE: u64 = 3 * 60;
 
 impl Auditor {
     /// Whether the delay of `event` ends more than `DELAY_END_MARGIN` after `now`.
@@ -93,49 +95,84 @@ impl Auditor {
         }
     }
 
-    /// Report each approval that is still fresh at `finished`, when the
-    /// lookup returned, and whose outpoint is spent. Keep only the approvals
-    /// whose outpoint Bitcoin does not show yet.
+    /// Judge each approval that is still fresh at `finished`, when the
+    /// lookups returned. Keep only the approvals that neither source shows
+    /// paid yet, until their deadline.
     fn judge_fresh_approvals(
         &mut self,
-        states: &HashMap<OutPoint, OutpointState>,
+        node: &HashMap<OutPoint, OutpointState>,
+        reference: &HashMap<OutPoint, ReferenceOutput>,
         finished: UnixSeconds,
     ) -> Vec<MonitorFinding> {
         self.drop_stale_approvals(finished);
         let mut findings = Vec::new();
-        self.fresh_approvals
-            .retain(|outpoint, event| match states.get(outpoint) {
-                Some(OutpointState::Spent) => {
-                    findings.push(MonitorFinding::DepositUnbacked { sui: event.clone() });
-                    false
-                }
-                Some(OutpointState::Unspent { .. }) => false,
-                Some(OutpointState::Missing) | None => true,
-            });
+        self.fresh_approvals.retain(|outpoint, event| {
+            let node = node.get(outpoint);
+            let reference = reference.get(outpoint);
+            let unbacked = |reason| MonitorFinding::DepositUnbacked {
+                sui: event.clone(),
+                reason,
+            };
+            if matches!(node, Some(OutpointState::Spent))
+                || matches!(reference, Some(ReferenceOutput::Spent))
+            {
+                findings.push(unbacked(DepositUnbackedReason::Spent));
+                return false;
+            }
+            let paid_on_reference = matches!(
+                reference,
+                Some(ReferenceOutput::Unspent { amount, script_pubkey })
+                    if *amount == event.amount && *script_pubkey == event.script_pubkey
+            );
+            if paid_on_reference || matches!(node, Some(OutpointState::Unspent { .. })) {
+                return false;
+            }
+            if finished >= event.timestamp_secs.saturating_add(FRESH_APPROVAL_DEADLINE) {
+                findings.push(unbacked(DepositUnbackedReason::Unverified));
+                return false;
+            }
+            true
+        });
         findings
     }
 
-    /// Look up the outpoints of the fresh approvals at `tip_height`. On an
-    /// RPC error, keep every approval for the next tick.
+    /// Look up the outpoints of the fresh approvals on the node at
+    /// `tip_height`, if it passed its sync check, and on the reference source.
     pub(super) fn check_fresh_approvals(
         &mut self,
-        tip_height: u64,
+        tip_height: Option<u64>,
         now: UnixSeconds,
-    ) -> anyhow::Result<Vec<MonitorFinding>> {
+    ) -> Vec<MonitorFinding> {
         self.drop_stale_approvals(now);
         if self.fresh_approvals.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         let outpoints = self.fresh_approvals.keys().copied().collect::<Vec<_>>();
         tracing::info!(
             approvals = outpoints.len(),
             "checking fresh deposit approvals"
         );
-        let states = self
-            .rpc_pollers
-            .btc_client
-            .lookup_outpoint_states(&outpoints, tip_height, true)?;
-        Ok(self.judge_fresh_approvals(&states, now_timestamp_secs()))
+        let node = match tip_height {
+            Some(tip_height) => self
+                .rpc_pollers
+                .btc_client
+                .lookup_outpoint_states(&outpoints, tip_height, true)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(?error, "node lookup of fresh approvals failed");
+                    HashMap::new()
+                }),
+            None => HashMap::new(),
+        };
+        let reference = match &self.rpc_pollers.reference_btc {
+            Some(reference) => reference
+                .lookup_outputs(&outpoints)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(?error, "reference lookup of fresh approvals failed");
+                    HashMap::new()
+                }),
+            None => HashMap::new(),
+        };
+        self.judge_fresh_approvals(&node, &reference, now_timestamp_secs())
     }
 }
 
@@ -152,11 +189,25 @@ mod tests {
         approval_of(&deposit_request(), approved_at)
     }
 
-    fn states(
-        approval: &SuiDepositApprovedEvent,
-        state: OutpointState,
-    ) -> HashMap<OutPoint, OutpointState> {
-        HashMap::from([(OutPoint::from(approval.deposit_id), state)])
+    /// A fresh approval at 1_000, judged at `finished` on the given answers.
+    /// Returns the findings and whether the approval was dropped.
+    async fn judge(
+        node: Option<OutpointState>,
+        reference: Option<ReferenceOutput>,
+        finished: UnixSeconds,
+    ) -> (Vec<MonitorFinding>, bool) {
+        let mut auditor = auditor_with_pool().await;
+        let fresh = approval(1_000);
+        auditor.note_fresh_approval(&fresh, 1_000);
+        let outpoint = OutPoint::from(fresh.deposit_id);
+        let node = node
+            .map(|s| HashMap::from([(outpoint, s)]))
+            .unwrap_or_default();
+        let reference = reference
+            .map(|s| HashMap::from([(outpoint, s)]))
+            .unwrap_or_default();
+        let findings = auditor.judge_fresh_approvals(&node, &reference, finished);
+        (findings, auditor.fresh_approvals.is_empty())
     }
 
     #[tokio::test]
@@ -184,37 +235,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fresh_approval_of_a_spent_outpoint_is_unbacked() {
-        let mut auditor = auditor_with_pool().await;
+    async fn either_source_can_verify_or_condemn_an_approval() {
+        use DepositUnbackedReason::*;
+        use OutpointState as Node;
+        use ReferenceOutput as Reference;
         let fresh = approval(1_000);
-        auditor.note_fresh_approval(&fresh, 1_000);
-
-        let findings = auditor.judge_fresh_approvals(&states(&fresh, OutpointState::Spent), 1_000);
-
-        assert_eq!(
-            findings,
-            vec![MonitorFinding::DepositUnbacked { sui: fresh }]
-        );
-        assert!(auditor.fresh_approvals.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_missing_outpoint_is_checked_again_and_an_unspent_one_is_dropped() {
-        let mut auditor = auditor_with_pool().await;
-        let fresh = approval(1_000);
-        auditor.note_fresh_approval(&fresh, 1_000);
-
-        let missing = states(&fresh, OutpointState::Missing);
-        assert!(auditor.judge_fresh_approvals(&missing, 1_000).is_empty());
-        assert_eq!(auditor.fresh_approvals.len(), 1);
-
-        let unspent = OutpointState::Unspent { block_time: 900 };
-        assert!(
-            auditor
-                .judge_fresh_approvals(&states(&fresh, unspent), 1_000)
-                .is_empty()
-        );
-        assert!(auditor.fresh_approvals.is_empty());
+        let paid = |amount| Reference::Unspent {
+            amount,
+            script_pubkey: fresh.script_pubkey.clone(),
+        };
+        let deadline = 1_000 + FRESH_APPROVAL_DEADLINE;
+        // The approval stops being fresh here.
+        let end = 1_000 + 600 - DELAY_END_MARGIN;
+        let unspent = Node::Unspent { block_time: 900 };
+        let cases = [
+            (Some(Node::Spent), None, 1_000, Some(Spent)),
+            (
+                Some(unspent.clone()),
+                Some(Reference::Spent),
+                1_000,
+                Some(Spent),
+            ),
+            // A payment on one source does not outweigh a spend on the other.
+            (
+                Some(Node::Spent),
+                Some(paid(fresh.amount)),
+                1_000,
+                Some(Spent),
+            ),
+            (Some(unspent), None, deadline, None),
+            // A node that peers withhold blocks from does not see the payment.
+            (
+                Some(Node::Missing),
+                Some(paid(fresh.amount)),
+                deadline,
+                None,
+            ),
+            (
+                Some(Node::Missing),
+                Some(Reference::Missing),
+                deadline - 1,
+                None,
+            ),
+            (None, None, deadline, Some(Unverified)),
+            // Another amount is not the approved payment.
+            (
+                None,
+                Some(paid(fresh.amount + 1)),
+                deadline,
+                Some(Unverified),
+            ),
+            // A lookup that returns after the approval stopped being fresh.
+            (Some(Node::Spent), None, end, None),
+        ];
+        for (node, reference, finished, reason) in cases {
+            let case = format!("{node:?} {reference:?} at {finished}");
+            let (findings, dropped) = judge(node, reference, finished).await;
+            let expected = reason
+                .map(|reason| MonitorFinding::DepositUnbacked {
+                    sui: fresh.clone(),
+                    reason,
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(findings, expected, "{case}");
+            // Only an approval that neither source settled is kept.
+            let kept = finished == deadline - 1;
+            assert_eq!(dropped, !kept, "{case}");
+        }
     }
 
     #[tokio::test]
@@ -228,21 +316,7 @@ mod tests {
         assert_eq!(auditor.fresh_approvals.len(), 1);
 
         // No lookup: the test client has no Bitcoin node to answer it.
-        let findings = auditor.check_fresh_approvals(0, end).unwrap();
-        assert!(findings.is_empty());
-        assert!(auditor.fresh_approvals.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_spend_seen_by_a_lookup_that_returns_too_late_is_not_reported() {
-        let mut auditor = auditor_with_pool().await;
-        let end = 1_000 + auditor.rpc_pollers.deposit_delay_secs - DELAY_END_MARGIN;
-        let fresh = approval(1_000);
-        auditor.note_fresh_approval(&fresh, 1_000);
-
-        // The lookup started while the approval was fresh, but returned after.
-        let spent = states(&fresh, OutpointState::Spent);
-        assert!(auditor.judge_fresh_approvals(&spent, end).is_empty());
+        assert!(auditor.check_fresh_approvals(None, end).is_empty());
         assert!(auditor.fresh_approvals.is_empty());
     }
 }
