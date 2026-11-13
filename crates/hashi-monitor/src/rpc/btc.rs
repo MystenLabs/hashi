@@ -23,12 +23,12 @@
 //! 2. Before a pass, `synced_height` checks the node and returns its height.
 //!    The node must follow `deployment.bitcoin_network`, be out of initial
 //!    block download, have a tip no older than `max_tip_age`, which the
-//!    auditor sets to its `SOURCE_STALE_LIMIT`, and have a peer. A node
-//!    with no peers hears of no new blocks, so its tip can look current
-//!    while it is not. Regtest has no peers and skips that check. At the
+//!    auditor sets to its `SOURCE_STALE_LIMIT`, and have an outbound peer.
+//!    Inbound clients may only download blocks, so they do not establish
+//!    connectivity to the Bitcoin network. Regtest skips this check. At the
 //!    first check, a node that reports its indexes must have a synced
 //!    `txindex`. A failed check fails the pass, so a wrong node, or one
-//!    with an older tip or no peers, becomes a `SourceStale` finding.
+//!    with an older tip or no outbound peers, becomes a `SourceStale` finding.
 //!    All batches use this height to calculate confirmation depth.
 //!    Blocks that arrive during the pass count on the next pass.
 //! 3. `prefetch_confirmations` looks all pending txids up in batches of
@@ -331,7 +331,7 @@ impl BtcRpcClient {
         Ok(info.blocks)
     }
 
-    /// Fail unless the node has a peer. See the module doc.
+    /// Fail unless the node has an outbound peer. See the module doc.
     fn ensure_peers(&self) -> anyhow::Result<()> {
         let response = self
             .transport
@@ -343,15 +343,15 @@ impl BtcRpcClient {
                 error.code
             );
         }
-        let connections = response
+        let connections_out = response
             .result
             .as_ref()
-            .and_then(|info| info.get("connections"))
+            .and_then(|info| info.get("connections_out"))
             .and_then(Value::as_u64)
-            .context("bitcoin getnetworkinfo has no connections")?;
+            .context("bitcoin getnetworkinfo has no connections_out")?;
         anyhow::ensure!(
-            connections > 0,
-            "bitcoind has no peers, so its tip may be stale"
+            connections_out > 0,
+            "bitcoind has no outbound peers, so its tip may be stale"
         );
         Ok(())
     }
@@ -1381,14 +1381,14 @@ mod tests {
     }
 
     #[test]
-    fn a_node_with_no_peers_is_not_synced() {
+    fn a_node_with_only_inbound_peers_is_not_synced() {
         let (client, server) = client_answered_by(
-            "HTTP/1.1 200 OK\r\nContent-Length: 48\r\n\r\n\
-             {\"result\":{\"connections\":0},\"error\":null,\"id\":1}",
+            "HTTP/1.1 200 OK\r\nContent-Length: 68\r\n\r\n\
+             {\"result\":{\"connections\":2,\"connections_out\":0},\"error\":null,\"id\":1}",
         );
         let error = client.ensure_peers().unwrap_err();
         server.join().unwrap();
-        assert!(error.to_string().contains("no peers"), "{error}");
+        assert!(error.to_string().contains("no outbound peers"), "{error}");
     }
 
     #[test]
