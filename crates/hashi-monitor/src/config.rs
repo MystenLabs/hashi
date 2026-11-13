@@ -63,10 +63,6 @@ pub struct PauseConfig {
     pub object_id: Option<sui_sdk_types::Address>,
     /// The validators the monitor votes for, each with a funded operator key.
     pub operators: Vec<PauseOperator>,
-    /// Esplora API of an independent Bitcoin source, such as
-    /// `https://mempool.space/api`. A fresh deposit approval that neither it
-    /// nor the monitor's node shows paid in time is unbacked.
-    pub bitcoin_api_url: String,
     /// Pause Hashi when a finding that autopauses is reported.
     #[serde(default)]
     pub autopause: bool,
@@ -111,6 +107,12 @@ impl SuiConfig {
 pub struct BtcConfig {
     /// Bitcoin JSON-RPC endpoint.
     pub rpc_url: String,
+
+    /// Esplora API of an independent Bitcoin source, such as
+    /// `https://mempool.space/api`. The deposit checks confirm the node's
+    /// answers on it, because whoever controls the node's peers can withhold
+    /// blocks from it.
+    pub reference_api_url: String,
 
     /// Optional HTTP headers for the JSON-RPC provider, such as the
     /// authorization a hosted node needs.
@@ -197,6 +199,8 @@ impl Config {
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
+                // Nothing listens here, so every reference lookup fails.
+                reference_api_url: "http://127.0.0.1:1".to_string(),
                 http_headers: BTreeMap::new(),
             },
             alert_mode: AlertMode::Strict,

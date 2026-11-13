@@ -1017,6 +1017,7 @@ mod tests {
         let mut cfg = Config::for_tests();
         cfg.btc = BtcConfig {
             rpc_url,
+            reference_api_url: cfg.btc.reference_api_url.clone(),
             http_headers: BTreeMap::from([(
                 "Authorization".to_string(),
                 format!(

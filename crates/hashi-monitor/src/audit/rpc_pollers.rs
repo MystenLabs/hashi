@@ -49,8 +49,8 @@ pub struct RpcPollers {
     pub guardian_poller: GuardianWithdrawalsPoller,
     pub sui_poller: SuiPoller,
     pub btc_client: BtcRpcClient,
-    /// The reference Bitcoin source, from the pause config.
-    pub reference_btc: Option<EsploraClient>,
+    /// The reference Bitcoin source. See `fresh_approvals`.
+    pub reference_btc: EsploraClient,
     /// When the last full Bitcoin pass started. It starts at the startup
     /// time. Thus a Bitcoin node that is down at startup becomes stale only
     /// after `SOURCE_STALE_LIMIT`.
@@ -86,10 +86,7 @@ impl RpcPollers {
             guardian_poller,
             sui_poller,
             btc_client: BtcRpcClient::new(cfg, confirmations, SOURCE_STALE_LIMIT)?,
-            reference_btc: cfg
-                .pause
-                .as_ref()
-                .map(|pause| EsploraClient::new(&pause.bitcoin_api_url, confirmations)),
+            reference_btc: EsploraClient::new(&cfg.btc.reference_api_url, confirmations),
             btc_checked_through: now_timestamp_secs(),
             deposit_delay_secs: settings.deposit_delay_secs,
         })
@@ -352,7 +349,10 @@ impl RpcPollers {
             sui_poller: poller_scanned(timestamp),
             btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS, SOURCE_STALE_LIMIT)
                 .unwrap(),
-            reference_btc: None,
+            reference_btc: EsploraClient::new(
+                &cfg.btc.reference_api_url,
+                MAINNET_MIN_CONFIRMATIONS,
+            ),
             btc_checked_through: timestamp,
             deposit_delay_secs: 600,
         }

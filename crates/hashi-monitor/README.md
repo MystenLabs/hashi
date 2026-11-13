@@ -125,6 +125,9 @@ complete example.
   `HASHI_MAINNET_PACKAGE_ID`. Set it for other deployments.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for
   hosted providers.
+- `btc.reference_api_url`: Esplora API of an independent Bitcoin source on the
+  same network, such as `https://mempool.space/api`. See
+  [Autopause](#autopause) for how the deposit checks use it.
 - `alert_mode` is optional. It picks the findings that alert: `strict`, the
   default, or `essential`. See [Findings](#findings).
 - Any string value may be `env:NAME`. The monitor replaces it with the
@@ -152,8 +155,6 @@ Configure `pause` to allow the monitor to pause the bridge.
   votes for that validator directly, so another validator that delegates to
   the same key cannot block it. Each operator is used once; one that fails
   is skipped.
-- `pause.bitcoin_api_url`: Esplora API of an independent Bitcoin source, such
-  as `https://mempool.space/api`. See below.
 - `pause.autopause`: set to `true` to enable autopause. Defaults to `false`.
 
 `hashi_monitor::pause::initiate_pause` proposes, approves, and executes a pause,
@@ -169,7 +170,7 @@ With autopause enabled, the monitor pauses the bridge on a security violation:
 
 Whoever controls the peers of the monitor's node can withhold blocks from it,
 so an honest deposit looks missing there. So during Move's mint delay, the
-monitor also looks each approved deposit up on `pause.bitcoin_api_url`.
+monitor also looks each approved deposit up on `btc.reference_api_url`.
 Either source showing the payment as approved verifies it, and either showing
 a spend is `Spent`. A deposit neither shows paid as approved within 3 minutes
 is `Unverified`. A deposit the node does not find later, such as one read after

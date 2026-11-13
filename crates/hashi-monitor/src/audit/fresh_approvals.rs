@@ -169,15 +169,14 @@ impl Auditor {
                 }),
             None => HashMap::new(),
         };
-        let reference = match &self.rpc_pollers.reference_btc {
-            Some(reference) => reference
-                .lookup_outputs(&outpoints)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(?error, "reference lookup of fresh approvals failed");
-                    HashMap::new()
-                }),
-            None => HashMap::new(),
-        };
+        let reference = self
+            .rpc_pollers
+            .reference_btc
+            .lookup_outputs(&outpoints)
+            .unwrap_or_else(|error| {
+                tracing::warn!(?error, "reference lookup of fresh approvals failed");
+                HashMap::new()
+            });
         self.judge_fresh_approvals(&node, &reference, now_timestamp_secs())
     }
 
@@ -185,11 +184,9 @@ impl Auditor {
     /// monitor reads late, after its delay, still pauses. The reference
     /// showing it paid as approved keeps `NotFound`: only the node misses it.
     /// A spend is `Spent`. Anything else, a failed lookup too, is
-    /// `Unverified`. With no reference source, `NotFound` stays.
+    /// `Unverified`.
     pub(super) fn confirm_not_found(&self, findings: &mut [MonitorFinding]) {
-        let Some(reference) = &self.rpc_pollers.reference_btc else {
-            return;
-        };
+        let reference = &self.rpc_pollers.reference_btc;
         for finding in findings {
             let MonitorFinding::DepositUnbacked {
                 sui,
@@ -420,7 +417,7 @@ mod tests {
                 }
                 None => ("http://127.0.0.1:1".to_owned(), None),
             };
-            auditor.rpc_pollers.reference_btc = Some(EsploraClient::new(&url, 1));
+            auditor.rpc_pollers.reference_btc = EsploraClient::new(&url, 1);
             let mut findings = not_found();
             auditor.confirm_not_found(&mut findings);
             if let Some(server) = server {
@@ -434,11 +431,5 @@ mod tests {
                 }]
             );
         }
-
-        // With no reference source, the node's answer stands.
-        let auditor = auditor_with_pool().await;
-        let mut findings = not_found();
-        auditor.confirm_not_found(&mut findings);
-        assert_eq!(findings, not_found());
     }
 }

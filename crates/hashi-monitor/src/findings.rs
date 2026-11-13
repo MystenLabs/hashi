@@ -147,8 +147,8 @@ pub enum DepositUnbackedReason {
     /// and `Auditor::confirm_not_found`.
     Unverified,
     /// The monitor's node does not find the payment, or a confirmed
-    /// transaction there pays another script, and the reference source shows
-    /// it paid, or no reference source is configured. A node that peers
+    /// transaction there pays another script, but the reference source shows
+    /// it paid. A node that peers
     /// withhold blocks from gives this, so it does not autopause. Each phase
     /// that produces it calls `Auditor::confirm_not_found` before reporting.
     NotFound,

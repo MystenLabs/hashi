@@ -70,7 +70,9 @@ impl EsploraClient {
         }
     }
 
-    /// The state of each outpoint at the source's current tip.
+    /// The state of each outpoint at the source's current tip. An outpoint
+    /// whose lookup fails is logged and left out, so it does not cost the
+    /// others their answers.
     pub fn lookup_outputs(
         &self,
         outpoints: &[OutPoint],
@@ -82,10 +84,16 @@ impl EsploraClient {
             .trim()
             .parse::<u64>()
             .context("failed to parse the esplora tip height")?;
-        outpoints
+        Ok(outpoints
             .iter()
-            .map(|outpoint| Ok((*outpoint, self.lookup(outpoint, tip_height)?)))
-            .collect()
+            .filter_map(|outpoint| match self.lookup(outpoint, tip_height) {
+                Ok(output) => Some((*outpoint, output)),
+                Err(error) => {
+                    tracing::warn!(?error, %outpoint, "esplora lookup failed");
+                    None
+                }
+            })
+            .collect())
     }
 
     fn lookup(&self, outpoint: &OutPoint, tip_height: u64) -> anyhow::Result<ReferenceOutput> {
@@ -173,6 +181,8 @@ mod tests {
         let not_found = "Transaction not found";
         let (url, server) = esplora_answering(vec![
             ok("100"),
+            // The first outpoint's lookup fails.
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_owned(),
             transaction(95),
             ok(r#"{"spent":false}"#),
             transaction(95),
@@ -187,23 +197,25 @@ mod tests {
             txid: txid(fill),
             vout: 0,
         };
-        let outpoints = [outpoint(1), outpoint(2), outpoint(3), outpoint(4)];
+        let failed = outpoint(5);
+        let outpoints = [failed, outpoint(1), outpoint(2), outpoint(3), outpoint(4)];
 
         let outputs = EsploraClient::new(&url, 6)
             .lookup_outputs(&outpoints)
             .unwrap();
         server.join().unwrap();
 
+        assert!(!outputs.contains_key(&failed));
         assert_eq!(
-            outputs[&outpoints[0]],
+            outputs[&outpoints[1]],
             ReferenceOutput::Unspent {
                 amount: 5000,
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }
         );
-        assert_eq!(outputs[&outpoints[1]], ReferenceOutput::Spent);
+        assert_eq!(outputs[&outpoints[2]], ReferenceOutput::Spent);
         // Five confirmations at tip 100.
-        assert_eq!(outputs[&outpoints[2]], ReferenceOutput::Missing);
         assert_eq!(outputs[&outpoints[3]], ReferenceOutput::Missing);
+        assert_eq!(outputs[&outpoints[4]], ReferenceOutput::Missing);
     }
 }

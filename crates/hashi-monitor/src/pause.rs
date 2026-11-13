@@ -216,7 +216,6 @@ mod tests {
         config.pause = Some(PauseConfig {
             transaction_rpc_url: networks.sui_network().rpc_url.clone(),
             operators: pause_operators,
-            bitcoin_api_url: String::new(),
             object_id: Some(ids.hashi_object_id),
             autopause: false,
         });

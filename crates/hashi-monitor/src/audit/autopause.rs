@@ -67,7 +67,6 @@ mod tests {
             transaction_rpc_url: "http://127.0.0.1:1".to_owned(),
             object_id: None,
             operators: Vec::new(),
-            bitcoin_api_url: String::new(),
             autopause,
         });
         let metrics = Arc::new(MonitorMetrics::new());
