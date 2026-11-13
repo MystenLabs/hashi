@@ -66,7 +66,7 @@ mod tests {
             // Nothing listens here, so a pause fails.
             transaction_rpc_url: "http://127.0.0.1:1".to_owned(),
             object_id: None,
-            operator_key_paths: Vec::new(),
+            operators: Vec::new(),
             autopause,
         });
         let metrics = Arc::new(MonitorMetrics::new());

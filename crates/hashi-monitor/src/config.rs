@@ -61,9 +61,8 @@ pub struct PauseConfig {
     /// Hashi shared object used for pause transactions.
     /// Omit to use the published mainnet Hashi object.
     pub object_id: Option<sui_sdk_types::Address>,
-    /// Funded operator key files for distinct seated validators, in any format
-    /// the Hashi CLI loads. Keys are loaded only when pausing.
-    pub operator_key_paths: Vec<PathBuf>,
+    /// The validators the monitor votes for, each with a funded operator key.
+    pub operators: Vec<PauseOperator>,
     /// Pause Hashi when a finding that autopauses is reported.
     #[serde(default)]
     pub autopause: bool,
@@ -74,6 +73,15 @@ impl PauseConfig {
         self.object_id
             .unwrap_or(hashi::constants::HASHI_MAINNET_OBJECT_ID)
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseOperator {
+    /// The validator to vote for, so another validator's delegation cannot block the key.
+    pub validator_address: sui_sdk_types::Address,
+    /// Its operator key file, loaded only when pausing.
+    pub key_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize)]

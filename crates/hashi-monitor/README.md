@@ -147,9 +147,11 @@ Configure `pause` to allow the monitor to pause the bridge.
   and submitting pause transactions.
 - `pause.object_id`: Hashi object used for pause transactions.
   Defaults to `HASHI_MAINNET_OBJECT_ID`; set it for other deployments.
-- `pause.operator_key_paths`: operator key files the monitor uses to sign
-  the governance transactions that pause the bridge. Each operator is used
-  once; one that fails is skipped.
+- `pause.operators`: the validators the monitor votes for, each with
+  `validator_address` and `key_path`, its operator key file. The monitor
+  votes for that validator directly, so another validator that delegates to
+  the same key cannot block it. Each operator is used once; one that fails
+  is skipped.
 - `pause.autopause`: set to `true` to enable autopause. Defaults to `false`.
 
 `hashi_monitor::pause::initiate_pause` proposes, approves, and executes a pause,

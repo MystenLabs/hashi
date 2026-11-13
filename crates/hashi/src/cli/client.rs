@@ -118,6 +118,8 @@ pub struct HashiClient {
     /// `--sender`, when given: the identity governance commands act as when
     /// there is no keypair to derive one from.
     acting_sender: Option<Address>,
+    /// The committee member governance calls act for, when configured.
+    acting_validator: Option<Address>,
     /// Optional executor for signing and submitting transactions
     executor: Option<SuiTxExecutor>,
     /// The RPC endpoint this client talks to (used for explorer deep-links)
@@ -261,6 +263,7 @@ impl HashiClient {
             hashi_ids,
             hashi_initial_shared_version,
             acting_sender: config.acting_sender,
+            acting_validator: config.acting_validator,
             executor,
             sui_rpc_url: config.sui_rpc_url.clone(),
         })
@@ -573,11 +576,13 @@ impl HashiClient {
         self.acting_sender.or_else(|| self.signer_address())
     }
 
-    /// Resolve the committee member (validator address) the acting address
-    /// acts for in governance calls: an exact validator match wins, otherwise
-    /// exactly one operator delegation; more than one is an error (see
+    /// The committee member (validator address) governance calls act for:
+    /// `acting_validator` if set, else resolved from the acting address (see
     /// `resolve_governance_identity`).
     pub fn resolve_validator_address(&self) -> anyhow::Result<Address> {
+        if let Some(validator) = self.acting_validator {
+            return Ok(validator);
+        }
         let sender = self.acting_address().ok_or_else(|| {
             anyhow::anyhow!("Cannot resolve validator: no keypair configured and no --sender given")
         })?;
