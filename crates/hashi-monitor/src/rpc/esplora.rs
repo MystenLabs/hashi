@@ -5,9 +5,9 @@
 //!
 //! Why it exists: whoever controls the peers of the monitor's node can withhold
 //! blocks from it. The node then cannot see an honest deposit, and a fake one
-//! looks the same. The auditor counts a fresh deposit approval as paid when
-//! either source shows its payment, so one stalled source cannot cause a pause
-//! or hide a fake deposit.
+//! looks the same. The auditor counts a deposit approval as paid when either
+//! source shows its payment, so one stalled source cannot cause a pause or
+//! hide a fake deposit.
 
 use std::collections::HashMap;
 
@@ -25,7 +25,10 @@ pub enum ReferenceOutput {
     /// output at that vout.
     Missing,
     /// The output exists, and a transaction, also in the mempool, spent it.
-    Spent,
+    Spent {
+        amount: u64,
+        script_pubkey: ScriptBuf,
+    },
     /// The output exists and is unspent.
     Unspent {
         amount: u64,
@@ -120,13 +123,19 @@ impl EsploraClient {
             .with_context(|| format!("esplora has no outspend for {outpoint}"))?
             .json()
             .context("failed to parse an esplora outspend")?;
-        if outspend.spent {
-            return Ok(ReferenceOutput::Spent);
-        }
-        Ok(ReferenceOutput::Unspent {
-            amount: output.value,
-            script_pubkey: ScriptBuf::from_hex(&output.scriptpubkey)
-                .context("failed to parse an esplora script")?,
+        let amount = output.value;
+        let script_pubkey = ScriptBuf::from_hex(&output.scriptpubkey)
+            .context("failed to parse an esplora script")?;
+        Ok(if outspend.spent {
+            ReferenceOutput::Spent {
+                amount,
+                script_pubkey,
+            }
+        } else {
+            ReferenceOutput::Unspent {
+                amount,
+                script_pubkey,
+            }
         })
     }
 
@@ -213,7 +222,13 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }
         );
-        assert_eq!(outputs[&outpoints[2]], ReferenceOutput::Spent);
+        assert_eq!(
+            outputs[&outpoints[2]],
+            ReferenceOutput::Spent {
+                amount: 5000,
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }
+        );
         // Five confirmations at tip 100.
         assert_eq!(outputs[&outpoints[3]], ReferenceOutput::Missing);
         assert_eq!(outputs[&outpoints[4]], ReferenceOutput::Missing);

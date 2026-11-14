@@ -125,7 +125,10 @@ pub enum OutpointState {
     Missing,
     /// The output exists, and a transaction in a block, at any depth, has
     /// spent it. With `include_mempool`, a mempool transaction also counts.
-    Spent,
+    Spent {
+        /// The output, so a caller can check what it paid.
+        output: TxOut,
+    },
     /// The output exists and is in the UTXO set. Without `include_mempool`,
     /// a mempool spend does not change this.
     Unspent {
@@ -502,7 +505,7 @@ impl BtcRpcClient {
         for (outpoint, block_time, output) in existing {
             let state = match unspent.get(&outpoint) {
                 Some(true) => OutpointState::Unspent { block_time, output },
-                Some(false) => OutpointState::Spent,
+                Some(false) => OutpointState::Spent { output },
                 None => anyhow::bail!("missing bitcoin gettxout result for {outpoint}"),
             };
             states.insert(outpoint, state);
@@ -1195,10 +1198,10 @@ mod tests {
 
         // The spend is only in the mempool.
         assert!(matches!(lookup(false)?, OutpointState::Unspent { .. }));
-        assert_eq!(lookup(true)?, OutpointState::Spent);
+        assert!(matches!(lookup(true)?, OutpointState::Spent { .. }));
 
         node.generate_blocks(MAINNET_MIN_CONFIRMATIONS)?;
-        assert_eq!(lookup(false)?, OutpointState::Spent);
+        assert!(matches!(lookup(false)?, OutpointState::Spent { .. }));
 
         Ok(())
     }

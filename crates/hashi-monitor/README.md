@@ -49,7 +49,7 @@ act on the other findings. They show a delay or a fault that moves no Bitcoin.
 | `WithdrawalUnapproved` | Yes | A guardian signature came without its Hashi approval, or more than 5 minutes before it. Or a Bitcoin spend came without its guardian signature, or more than 2 hours before it. The monitor looks the transaction up on Bitcoin from the Hashi approval, so it sees a spend that the guardian never logged. |
 | `WithdrawalStuck` | No | The guardian signature is missing 1 hour after the Hashi approval, or the Bitcoin confirmation is missing 1 day after the signature. The monitor reports a missing event at each tick until it comes, and a late event once, when it comes. A user waits for Bitcoin. A spend that the guardian never logged is a `WithdrawalUnapproved`, and an input that another transaction spent is a `UtxoUnexpectedSpend`. |
 | `WithdrawalInvalid` | Yes | The withdrawal's transaction or events contradict each other. The approved inputs and outputs do not build a transaction, or do not give the approved txid. Or two events state another txid, other inputs, payouts, or change. Or one event came again with other contents. Or two pending withdrawals list one input. |
-| `DepositUnbacked` | Yes | An approved deposit's outpoint holds no unspent Bitcoin output that pays the approval. `Spent`: the monitor's node or the reference source shows it spent before the mint. `Unverified`: neither source shows the payment as approved in time. `NotFound`: the monitor's node does not find the payment, but the reference source shows it. |
+| `DepositUnbacked` | Yes | An approved deposit's outpoint holds no Bitcoin output that pays the approval. `Spent`: the monitor's node or the reference source shows it spent before the mint. `Unverified`: neither source shows an output that pays the approval within 3 minutes of the monitor reading it. `NotFound`: the monitor's node alone does not find it. |
 | `DepositMismatch` | Yes | Two events of one deposit request disagree: the approval and the Bitcoin payment, the approval and its request, or two requests. |
 | `DepositLate` | Yes | An approved deposit's Bitcoin block is more than 2 hours after the approval. A miner can date a block at most 2 hours ahead, so Hashi approved before Bitcoin confirmed the payment. |
 | `DepositApprovalStalled` | No | At least 2 deposits that look valid have no approval 3 hours after the later of their latest request and their Bitcoin block, and no deposit was approved since. A sanction leaves one valid-looking deposit unapproved, so 1 alone is not a finding. Unapproved deposits are logged as `deposit not approved` at each daily pool check, with the causes the monitor can infer: a wrong amount, a block more than 1 day after the request, or a sanction or withheld approval. |
@@ -169,15 +169,13 @@ With autopause enabled, the monitor pauses the bridge on a security violation:
 `MonitorFinding::autopauses`.
 
 Whoever controls the peers of the monitor's node can withhold blocks from it,
-so an honest deposit looks missing there. So during Move's mint delay, the
-monitor also looks each approved deposit up on `btc.reference_api_url`.
-Either source showing the payment as approved verifies it, and either showing
-a spend is `Spent`. A deposit neither shows paid as approved within 3 minutes
-is `Unverified`. A deposit the node does not find later, such as one read after
-its delay, is looked up on the reference source too: `NotFound` only if it
-shows the payment as approved, else `Unverified`. One stalled source can then
-neither pause the bridge nor hide a fake deposit. `NotFound` does not
-autopause.
+so an honest deposit looks missing there. So the monitor looks each approved
+deposit up once on both its node and `btc.reference_api_url`, until one shows
+an output that pays the approval. Before the mint, either showing it spent is
+`Spent`; after the mint, a withdrawal may spend it. Neither showing the
+payment within 3 minutes of the monitor reading the approval is `Unverified`.
+One stalled source can then neither pause the bridge nor hide a fake deposit.
+`NotFound`, from the node alone, does not autopause.
 
 - The pause starts as soon as the finding is reported, and only one runs at
   a time. It is tried once. On failure, pause the bridge by hand.

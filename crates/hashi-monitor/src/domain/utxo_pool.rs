@@ -433,7 +433,7 @@ impl UtxoPool {
                         });
                     }
                 }
-                Some(OutpointState::Spent) => {
+                Some(OutpointState::Spent { .. }) => {
                     suspects.insert(
                         *outpoint,
                         SuspectSpend {
@@ -529,6 +529,12 @@ mod tests {
         TxOut {
             value: Amount::from_sat(amount),
             script_pubkey: script(),
+        }
+    }
+
+    fn spent(amount: u64) -> OutpointState {
+        OutpointState::Spent {
+            output: output(amount),
         }
     }
 
@@ -930,7 +936,7 @@ mod tests {
         let mut pool = UtxoPool::default();
         assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
 
-        let (findings, suspects) = check_one(&pool, Some(OutpointState::Spent), 1);
+        let (findings, suspects) = check_one(&pool, Some(spent(1_000)), 1);
 
         assert!(findings.is_empty());
         assert!(suspects.contains_key(&outpoint(1)));
@@ -1114,7 +1120,7 @@ mod tests {
     #[test]
     fn a_spent_utxo_is_a_suspect() {
         let pool = pool_seen_at(0);
-        let (findings, suspects) = check_one(&pool, Some(OutpointState::Spent), 1);
+        let (findings, suspects) = check_one(&pool, Some(spent(1_000)), 1);
         assert!(findings.is_empty());
         assert_eq!(
             suspects,
@@ -1148,7 +1154,7 @@ mod tests {
         let mut pool = pool_seen_at(0);
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
         let states = HashMap::from([
-            (outpoint(1), OutpointState::Spent),
+            (outpoint(1), spent(1_000)),
             (
                 change_of(7),
                 OutpointState::Unspent {

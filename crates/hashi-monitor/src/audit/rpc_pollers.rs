@@ -9,7 +9,7 @@
 //!
 //! How it works:
 //! 1. Read Sui events and guardian logs into the flow machines.
-//! 2. Before the mint, check that each fresh deposit approval names an unspent outpoint.
+//! 2. Check that each deposit approval names an output that pays it.
 //! 3. Check Bitcoin confirmations from each withdrawal's Sui approval on, also with no guardian log.
 //! 4. Find each source that is behind its limit. The auditor reports it as a `SourceStale` finding.
 //! 5. Leave pool updates and checks to the auditor scheduler.
@@ -49,7 +49,7 @@ pub struct RpcPollers {
     pub guardian_poller: GuardianWithdrawalsPoller,
     pub sui_poller: SuiPoller,
     pub btc_client: BtcRpcClient,
-    /// The reference Bitcoin source. See `fresh_approvals`.
+    /// The reference Bitcoin source. See `approval_checks`.
     pub reference_btc: EsploraClient,
     /// When the last full Bitcoin pass started. It starts at the startup
     /// time. Thus a Bitcoin node that is down at startup becomes stale only
@@ -222,8 +222,8 @@ impl Auditor {
         // Before the node's sync check can fail the tick: a node that peers
         // withhold blocks from fails it, and the reference source still checks.
         // Report now, so that a later error in this tick does not lose them.
-        let fresh = self.check_fresh_approvals(tip_height.as_ref().ok().copied(), started_at);
-        self.report_findings("btc", &fresh);
+        let approvals = self.check_approvals(tip_height.as_ref().ok().copied());
+        self.report_findings("btc", &approvals);
         let tip_height = tip_height?;
         // A "not confirmed yet" answer goes stale. A confirmed one is kept
         // until no flow names its txid.
@@ -256,8 +256,7 @@ impl Auditor {
     /// Complete flows' dependent machines must already be closed or ready to close when this tick finishes.
     pub fn tick_btc(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
-        let mut findings = self.fetch_btc_info(started_at)?;
-        self.confirm_not_found(&mut findings);
+        let findings = self.fetch_btc_info(started_at)?;
         // The machines Bitcoin answered stay until pool maintenance removes them.
         tracing::info!(
             withdrawals_waiting = self

@@ -143,14 +143,12 @@ pub enum DepositUnbackedReason {
     /// The monitor's node or the reference source shows the output spent
     /// before the mint.
     Spent,
-    /// Neither source verified the payment in time. See `fresh_approvals`
-    /// and `Auditor::confirm_not_found`.
+    /// Neither source showed an output that pays the approval in time. See
+    /// `approval_checks`.
     Unverified,
-    /// The monitor's node does not find the payment, or a confirmed
-    /// transaction there pays another script, but the reference source shows
-    /// it paid. A node that peers
-    /// withhold blocks from gives this, so it does not autopause. Each phase
-    /// that produces it calls `Auditor::confirm_not_found` before reporting.
+    /// The monitor's node alone does not find an output that pays the
+    /// approval. A node that peers withhold blocks from gives this, so it does
+    /// not autopause.
     NotFound,
 }
 

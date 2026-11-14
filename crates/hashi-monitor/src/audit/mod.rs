@@ -17,7 +17,7 @@
 //!    until it is current. Then remove the closed machines and save the snapshot.
 //!    Only then start the loop, so the loop does not start with a large unanswered backlog.
 //! 5. Check Bitcoin confirmations from each withdrawal's Sui approval on.
-//!    Check that each fresh deposit approval names an unspent outpoint.
+//!    Check each deposit approval against Bitcoin. See `approval_checks`.
 //! 6. Every `MAINTENANCE_INTERVAL`, run one maintenance tick in this order:
 //!    1. Remove the closed machines and add their flows to the pool. Log the open flows.
 //!       This step is first, so each later step sees only open machines and a current pool.
@@ -74,8 +74,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
+mod approval_checks;
 mod autopause;
-mod fresh_approvals;
 mod hbtc_supply;
 mod pool_checks;
 mod pool_maintenance;
@@ -146,9 +146,9 @@ pub struct Auditor {
     utxo_pool: UtxoPool,
     /// Spends waiting for the Sui cursor, by outpoint.
     suspect_spends: HashMap<OutPoint, SuspectSpend>,
-    /// Deposit approvals whose mint delay has not ended, by outpoint. See
-    /// `fresh_approvals`.
-    fresh_approvals: HashMap<OutPoint, SuiDepositApprovedEvent>,
+    /// Deposit approvals no source has settled yet, by outpoint, with their
+    /// deadline. See `approval_checks`.
+    unsettled_approvals: HashMap<OutPoint, (SuiDepositApprovedEvent, UnixSeconds)>,
     rpc_pollers: RpcPollers,
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.
@@ -216,7 +216,7 @@ impl Auditor {
             pending_deposits: HashMap::new(),
             utxo_pool: pool,
             suspect_spends: HashMap::new(),
-            fresh_approvals: HashMap::new(),
+            unsettled_approvals: HashMap::new(),
             rpc_pollers,
             metrics,
             store,
@@ -319,7 +319,7 @@ impl Auditor {
     /// the request came first. While its machine is open, the machine keeps
     /// the approval. Once it closed, the pool has its answer.
     fn ingest_deposit_approved(&mut self, event: SuiDepositApprovedEvent) -> Vec<MonitorFinding> {
-        self.note_fresh_approval(&event, now_timestamp_secs());
+        self.note_approval(&event, now_timestamp_secs());
         self.last_deposit_approval = self.last_deposit_approval.max(Some(event.timestamp_secs));
         match self.pending_deposits.get_mut(&event.request_id) {
             Some(sm) => sm.add_sui_approval(event, &self.cfg.timing),
@@ -334,7 +334,6 @@ impl Auditor {
         for event in events {
             findings.extend(self.ingest(event));
         }
-        self.confirm_not_found(&mut findings);
         self.report_findings("ingest", &findings);
         findings
     }
@@ -660,7 +659,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
-            fresh_approvals: HashMap::new(),
+            unsettled_approvals: HashMap::new(),
             rpc_pollers: RpcPollers::for_tests(&cfg, approved_at),
             cfg,
             metrics: Arc::new(MonitorMetrics::new()),
@@ -878,7 +877,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
-            fresh_approvals: HashMap::new(),
+            unsettled_approvals: HashMap::new(),
             rpc_pollers: RpcPollers::for_tests(cfg, cursor),
             metrics,
             store: SnapshotStore::in_memory(),
