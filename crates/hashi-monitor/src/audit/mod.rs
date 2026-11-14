@@ -17,7 +17,7 @@
 //!    until it is current. Then remove the closed machines and save the snapshot.
 //!    Only then start the loop, so the loop does not start with a large unanswered backlog.
 //! 5. Check Bitcoin confirmations from each withdrawal's Sui approval on.
-//!    Check that each fresh deposit approval names an unspent outpoint.
+//!    Check each deposit approval against Bitcoin. See `approval_checks`.
 //! 6. Every `MAINTENANCE_INTERVAL`, run one maintenance tick in this order:
 //!    1. Remove the closed machines and add their flows to the pool. Log the open flows.
 //!       This step is first, so each later step sees only open machines and a current pool.
@@ -74,20 +74,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
-mod fresh_approvals;
+mod approval_checks;
+mod autopause;
 mod hbtc_supply;
 mod pool_checks;
 mod pool_maintenance;
 mod rpc_pollers;
 
 /// How often Sui is polled. A deposit approval must reach the monitor
-/// early in Move's delay before the mint, ten minutes by default.
-const SUI_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// early in Move's delay before the mint, ten minutes by default, so
+/// autopause can land first.
+const SUI_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How often Bitcoin is asked about the pending transactions. An approval
 /// is reported unbacked at the second empty lookup after it, so with
-/// `SUI_POLL_INTERVAL` the alert comes within five minutes of it.
-const BTC_POLL_INTERVAL: Duration = Duration::from_secs(2 * 60);
+/// `SUI_POLL_INTERVAL` the alert comes within about three minutes of it.
+const BTC_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often the guardian's log is polled. Each poll lists the current
 /// directory and reads only its new logs. The withdrawal bounds are hours.
@@ -144,9 +146,9 @@ pub struct Auditor {
     utxo_pool: UtxoPool,
     /// Spends waiting for the Sui cursor, by outpoint.
     suspect_spends: HashMap<OutPoint, SuspectSpend>,
-    /// Deposit approvals whose mint delay has not ended, by outpoint. See
-    /// `fresh_approvals`.
-    fresh_approvals: HashMap<OutPoint, SuiDepositApprovedEvent>,
+    /// Deposit approvals no source has settled yet, by outpoint, with their
+    /// deadline. See `approval_checks`.
+    unsettled_approvals: HashMap<OutPoint, (SuiDepositApprovedEvent, UnixSeconds)>,
     rpc_pollers: RpcPollers,
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.
@@ -165,6 +167,8 @@ pub struct Auditor {
     last_hbtc_supply_read: UnixSeconds,
     /// Move's time of the latest Sui `DepositApproved`.
     last_deposit_approval: Option<UnixSeconds>,
+    /// The running or last autopause. See `autopause`.
+    pause_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Auditor {
@@ -212,7 +216,7 @@ impl Auditor {
             pending_deposits: HashMap::new(),
             utxo_pool: pool,
             suspect_spends: HashMap::new(),
-            fresh_approvals: HashMap::new(),
+            unsettled_approvals: HashMap::new(),
             rpc_pollers,
             metrics,
             store,
@@ -222,6 +226,7 @@ impl Auditor {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: 0,
             last_deposit_approval: None,
+            pause_task: None,
         };
         if let Some(state) = state {
             auditor.restore(state);
@@ -314,7 +319,7 @@ impl Auditor {
     /// the request came first. While its machine is open, the machine keeps
     /// the approval. Once it closed, the pool has its answer.
     fn ingest_deposit_approved(&mut self, event: SuiDepositApprovedEvent) -> Vec<MonitorFinding> {
-        self.note_fresh_approval(&event, now_timestamp_secs());
+        self.note_approval(&event, now_timestamp_secs());
         self.last_deposit_approval = self.last_deposit_approval.max(Some(event.timestamp_secs));
         match self.pending_deposits.get_mut(&event.request_id) {
             Some(sm) => sm.add_sui_approval(event, &self.cfg.timing),
@@ -434,22 +439,23 @@ impl Auditor {
         )
     }
 
-    /// Log the findings, and record the ones that alert in the metrics.
-    fn report_findings(&self, phase: &'static str, findings: &[MonitorFinding]) {
+    /// Log the findings, record the alerting ones, and autopause on them.
+    fn report_findings(&mut self, phase: &'static str, findings: &[MonitorFinding]) {
         let mode = self.cfg.alert_mode;
         log_findings("continuous", phase, findings, mode);
         let alerts = findings.iter().filter(|finding| finding.alerts_in(mode));
         self.metrics.record_findings(alerts, now_timestamp_secs());
+        self.autopause(findings);
     }
 
     /// Report the open withdrawals that missed a timing bound.
-    fn check_timing(&self) {
+    fn check_timing(&mut self) {
         let violations = self.detect_timing_violations();
         self.report_findings("timing", &violations);
     }
 
     /// Report a stall of deposit approvals.
-    fn check_deposit_approvals(&self) {
+    fn check_deposit_approvals(&mut self) {
         let stall = self.utxo_pool.approval_stall(
             self.last_deposit_approval,
             self.rpc_pollers.sui_read_until(),
@@ -459,7 +465,7 @@ impl Auditor {
     }
 
     /// Report a source, the daily pool check, or the hBTC supply read that is behind its limit.
-    fn check_staleness(&self) {
+    fn check_staleness(&mut self) {
         let now = now_timestamp_secs();
         let mut stale = self.rpc_pollers.stale_sources(now);
         stale.extend(self.stale_pool_check(now));
@@ -653,7 +659,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
-            fresh_approvals: HashMap::new(),
+            unsettled_approvals: HashMap::new(),
             rpc_pollers: RpcPollers::for_tests(&cfg, approved_at),
             cfg,
             metrics: Arc::new(MonitorMetrics::new()),
@@ -664,6 +670,7 @@ mod tests {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: approved_at,
             last_deposit_approval: None,
+            pause_task: None,
         }
     }
 
@@ -687,7 +694,7 @@ mod tests {
         let unbacked = auditor.ingest(MonitorEvent::DepositApproved(sui.clone()));
         assert!(matches!(
             &unbacked[..],
-            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+            [MonitorFinding::DepositUnbacked { sui: unbacked, .. }] if *unbacked == sui
         ));
 
         assert!(
@@ -821,7 +828,7 @@ mod tests {
 
         assert!(matches!(
             &findings[..],
-            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+            [MonitorFinding::DepositUnbacked { sui: unbacked, .. }] if *unbacked == sui
         ));
         assert!(auditor.gc_and_update_pool().is_empty());
         assert!(auditor.utxo_pool.is_empty());
@@ -870,7 +877,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
-            fresh_approvals: HashMap::new(),
+            unsettled_approvals: HashMap::new(),
             rpc_pollers: RpcPollers::for_tests(cfg, cursor),
             metrics,
             store: SnapshotStore::in_memory(),
@@ -880,6 +887,7 @@ mod tests {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: cursor,
             last_deposit_approval: None,
+            pause_task: None,
         }
     }
 
@@ -889,7 +897,7 @@ mod tests {
         let mut cfg = Config::for_tests();
         cfg.alert_mode = mode;
         let metrics = Arc::new(MonitorMetrics::new());
-        let auditor = auditor_with(&cfg, metrics.clone());
+        let mut auditor = auditor_with(&cfg, metrics.clone());
         let skew = MonitorFinding::GuardianClockSkew {
             session_id: SessionID::from("session"),
             object_key: "log".to_string(),
@@ -933,7 +941,13 @@ mod tests {
 
         assert!(late.is_essential());
         assert!(!stalled.is_essential());
-        assert!(MonitorFinding::DepositUnbacked { sui }.is_essential());
+        assert!(
+            MonitorFinding::DepositUnbacked {
+                sui,
+                reason: crate::findings::DepositUnbackedReason::NotFound
+            }
+            .is_essential()
+        );
     }
 
     #[tokio::test]

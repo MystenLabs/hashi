@@ -49,7 +49,7 @@ act on the other findings. They show a delay or a fault that moves no Bitcoin.
 | `WithdrawalUnapproved` | Yes | A guardian signature came without its Hashi approval, or more than 5 minutes before it. Or a Bitcoin spend came without its guardian signature, or more than 2 hours before it. The monitor looks the transaction up on Bitcoin from the Hashi approval, so it sees a spend that the guardian never logged. |
 | `WithdrawalStuck` | No | The guardian signature is missing 1 hour after the Hashi approval, or the Bitcoin confirmation is missing 1 day after the signature. The monitor reports a missing event at each tick until it comes, and a late event once, when it comes. A user waits for Bitcoin. A spend that the guardian never logged is a `WithdrawalUnapproved`, and an input that another transaction spent is a `UtxoUnexpectedSpend`. |
 | `WithdrawalInvalid` | Yes | The withdrawal's transaction or events contradict each other. The approved inputs and outputs do not build a transaction, or do not give the approved txid. Or two events state another txid, other inputs, payouts, or change. Or one event came again with other contents. Or two pending withdrawals list one input. |
-| `DepositUnbacked` | Yes | An approved deposit's outpoint holds no unspent Bitcoin output. |
+| `DepositUnbacked` | Yes | An approved deposit's outpoint holds no Bitcoin output that pays the approval. `Spent`: the monitor's node or the reference source shows it spent before the mint. `Unverified`: neither source shows an output that pays the approval within 3 minutes of the monitor reading it. `NotFound`: the monitor's node alone does not find it. |
 | `DepositMismatch` | Yes | Two events of one deposit request disagree: the approval and the Bitcoin payment, the approval and its request, or two requests. |
 | `DepositLate` | Yes | An approved deposit's Bitcoin block is more than 2 hours after the approval. A miner can date a block at most 2 hours ahead, so Hashi approved before Bitcoin confirmed the payment. |
 | `DepositApprovalStalled` | No | At least 2 deposits that look valid have no approval 3 hours after the later of their latest request and their Bitcoin block, and no deposit was approved since. A sanction leaves one valid-looking deposit unapproved, so 1 alone is not a finding. Unapproved deposits are logged as `deposit not approved` at each daily pool check, with the causes the monitor can infer: a wrong amount, a block more than 1 day after the request, or a sanction or withheld approval. |
@@ -125,6 +125,9 @@ complete example.
   `HASHI_MAINNET_PACKAGE_ID`. Set it for other deployments.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for
   hosted providers.
+- `btc.reference_api_url`: Esplora API of an independent Bitcoin source on the
+  same network, such as `https://mempool.space/api`. See
+  [Autopause](#autopause) for how the deposit checks use it.
 - `alert_mode` is optional. It picks the findings that alert: `strict`, the
   default, or `essential`. See [Findings](#findings).
 - Any string value may be `env:NAME`. The monitor replaces it with the
@@ -147,12 +150,41 @@ Configure `pause` to allow the monitor to pause the bridge.
   and submitting pause transactions.
 - `pause.object_id`: Hashi object used for pause transactions.
   Defaults to `HASHI_MAINNET_OBJECT_ID`; set it for other deployments.
-- `pause.operator_key_paths`: operator key files the monitor uses to sign
-  the governance transactions that pause the bridge.
+- `pause.operators`: the validators the monitor votes for, each with
+  `validator_address` and `key_path`, its operator key file. The monitor
+  votes for that validator directly, so another validator that delegates to
+  the same key cannot block it. Each operator is used once; one that fails
+  is skipped.
+- `pause.autopause`: set to `true` to enable autopause. Defaults to `false`.
 
 `hashi_monitor::pause::initiate_pause` proposes, approves, and executes a pause,
 then confirms the on-chain paused flag. An already-paused bridge is a no-op.
 Calling it without `pause` configured returns a configuration error.
+
+### Autopause
+
+With autopause enabled, the monitor pauses the bridge on a security violation:
+`DepositUnbacked` with `Spent` or `Unverified`, `DepositMismatch` with
+`PaymentDiffers`, `WithdrawalUnapproved`, or `UtxoUnexpectedSpend`. See
+`MonitorFinding::autopauses`.
+
+Whoever controls the peers of the monitor's node can withhold blocks from it,
+so an honest deposit looks missing there. So the monitor looks each approved
+deposit up once on both its node and `btc.reference_api_url`, until one shows
+an output that pays the approval. Before the mint, either showing it spent is
+`Spent`; after the mint, a withdrawal may spend it. Neither showing the
+payment within 3 minutes of the monitor reading the approval is `Unverified`.
+One stalled source can then neither pause the bridge nor hide a fake deposit.
+`NotFound`, from the node alone, does not autopause.
+
+- The pause starts as soon as the finding is reported, and only one runs at
+  a time. It is tried once. On failure, pause the bridge by hand.
+- Findings replayed at startup autopause too. A pause of an already paused
+  bridge does nothing.
+
+Some findings repeat until their cause is fixed. Fix the cause before
+unpausing the bridge, or turn autopause off first, or the monitor pauses it
+again.
 
 ## Alerting
 
@@ -164,6 +196,9 @@ The monitor decides what is wrong. An alerting system needs only these rules:
    essential findings set this metric.
 2. `up < 1`: the monitor cannot be scraped.
 3. `absent(up)`: no monitor runs.
+4. `time() - hashi_monitor_autopause_last_timestamp_seconds < 3600`: an
+   autopause succeeded or failed in the last hour. Each `result` fires on its
+   own.
 
 A restart clears the finding metric. The restart reads the events after the
 last save again, so their findings come again.
@@ -188,6 +223,8 @@ last save again, so their findings come again.
 - `hashi_monitor_hbtc_supply_sats`: the hBTC supply.
 - `hashi_monitor_open_flows{kind}`: the open `withdrawal` and `deposit` flows,
   set at each maintenance tick and after the initial catch-up.
+- `hashi_monitor_autopause_last_timestamp_seconds{result}`: the time of the
+  last autopause that `succeeded` or `failed`.
 
 The hBTC supply less the pool value is zero or below in an honest bridge:
 

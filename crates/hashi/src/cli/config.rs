@@ -78,6 +78,11 @@ pub struct CliConfig {
     #[serde(skip)]
     pub acting_sender: Option<Address>,
 
+    /// The committee member governance calls act for, instead of resolving it
+    /// from the signer. Never read from or written to the file.
+    #[serde(skip)]
+    pub acting_validator: Option<Address>,
+
     /// Optional Bitcoin configuration for deposit/withdrawal commands
     #[serde(default)]
     pub bitcoin: Option<BitcoinConfig>,
@@ -100,6 +105,7 @@ impl Default for CliConfig {
             keypair_path: None,
             gas_coin: None,
             acting_sender: None,
+            acting_validator: None,
             bitcoin: None,
         }
     }

@@ -21,6 +21,7 @@ use serde::Serialize;
 use sui_sdk_types::Address;
 
 use crate::findings::DepositMismatchReason;
+use crate::findings::DepositUnbackedReason;
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 
@@ -135,7 +136,10 @@ impl SuiDepositApprovedEvent {
         skew: u64,
     ) -> Vec<MonitorFinding> {
         let Some(paid) = btc_deposit_info else {
-            return vec![MonitorFinding::DepositUnbacked { sui: self.clone() }];
+            return vec![MonitorFinding::DepositUnbacked {
+                sui: self.clone(),
+                reason: DepositUnbackedReason::NotFound,
+            }];
         };
         let mut findings = Vec::new();
         let deadline = self.timestamp_secs + skew;

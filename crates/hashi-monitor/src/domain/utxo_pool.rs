@@ -423,7 +423,7 @@ impl UtxoPool {
         let mut suspects = HashMap::new();
         for (outpoint, utxo) in &self.utxos {
             match states.get(outpoint) {
-                Some(OutpointState::Unspent { block_time }) => {
+                Some(OutpointState::Unspent { block_time, .. }) => {
                     let age_secs = now.saturating_sub(*block_time);
                     if utxo.origin.in_move_pool() && age_secs >= timing.utxo_max_age {
                         findings.push(MonitorFinding::UtxoTooOld {
@@ -433,7 +433,7 @@ impl UtxoPool {
                         });
                     }
                 }
-                Some(OutpointState::Spent) => {
+                Some(OutpointState::Spent { .. }) => {
                     suspects.insert(
                         *outpoint,
                         SuspectSpend {
@@ -467,6 +467,7 @@ impl UtxoPool {
 mod tests {
     use super::*;
     use crate::findings::DepositMismatchReason;
+    use crate::findings::DepositUnbackedReason;
 
     use bitcoin::Amount;
     use bitcoin::ScriptBuf;
@@ -528,6 +529,12 @@ mod tests {
         TxOut {
             value: Amount::from_sat(amount),
             script_pubkey: script(),
+        }
+    }
+
+    fn spent(amount: u64) -> OutpointState {
+        OutpointState::Spent {
+            output: output(amount),
         }
     }
 
@@ -805,7 +812,10 @@ mod tests {
         let sui = sui_approval(1, 1_000, script());
         assert_eq!(
             pool.check_sui_approval(&sui, SKEW),
-            vec![MonitorFinding::DepositUnbacked { sui }]
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                reason: DepositUnbackedReason::NotFound
+            }]
         );
     }
 
@@ -815,7 +825,13 @@ mod tests {
 
         let sui = sui_approval(2, 1_000, script());
         let findings = pool.check_sui_approval(&sui, SKEW);
-        assert_eq!(findings, vec![MonitorFinding::DepositUnbacked { sui }]);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                reason: DepositUnbackedReason::NotFound
+            }]
+        );
     }
 
     #[test]
@@ -830,7 +846,10 @@ mod tests {
         };
         assert_eq!(
             pool.check_sui_approval(&sui, SKEW),
-            vec![MonitorFinding::DepositUnbacked { sui }]
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                reason: DepositUnbackedReason::NotFound
+            }]
         );
     }
 
@@ -884,7 +903,10 @@ mod tests {
     #[test]
     fn an_unspent_utxo_is_reported_at_the_max_age() {
         let pool = pool_seen_at(0);
-        let state = OutpointState::Unspent { block_time: 1_000 };
+        let state = OutpointState::Unspent {
+            block_time: 1_000,
+            output: output(1_000),
+        };
         assert!(findings_one(&pool, Some(state.clone()), 1_000 + MAX_AGE - 1).is_empty());
 
         assert_eq!(
@@ -901,7 +923,10 @@ mod tests {
     fn an_unapproved_deposit_is_not_reported_at_the_max_age() {
         let mut pool = UtxoPool::default();
         assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
-        let state = OutpointState::Unspent { block_time: 0 };
+        let state = OutpointState::Unspent {
+            block_time: 0,
+            output: output(1_000),
+        };
 
         assert!(findings_one(&pool, Some(state), MAX_AGE).is_empty());
     }
@@ -911,7 +936,7 @@ mod tests {
         let mut pool = UtxoPool::default();
         assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
 
-        let (findings, suspects) = check_one(&pool, Some(OutpointState::Spent), 1);
+        let (findings, suspects) = check_one(&pool, Some(spent(1_000)), 1);
 
         assert!(findings.is_empty());
         assert!(suspects.contains_key(&outpoint(1)));
@@ -1095,7 +1120,7 @@ mod tests {
     #[test]
     fn a_spent_utxo_is_a_suspect() {
         let pool = pool_seen_at(0);
-        let (findings, suspects) = check_one(&pool, Some(OutpointState::Spent), 1);
+        let (findings, suspects) = check_one(&pool, Some(spent(1_000)), 1);
         assert!(findings.is_empty());
         assert_eq!(
             suspects,
@@ -1129,8 +1154,14 @@ mod tests {
         let mut pool = pool_seen_at(0);
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
         let states = HashMap::from([
-            (outpoint(1), OutpointState::Spent),
-            (change_of(7), OutpointState::Unspent { block_time: 700 }),
+            (outpoint(1), spent(1_000)),
+            (
+                change_of(7),
+                OutpointState::Unspent {
+                    block_time: 700,
+                    output: output(550),
+                },
+            ),
         ]);
 
         let (findings, suspects) = pool.check(&states, 701, &Timing::for_tests());

@@ -61,9 +61,11 @@ pub struct PauseConfig {
     /// Hashi shared object used for pause transactions.
     /// Omit to use the published mainnet Hashi object.
     pub object_id: Option<sui_sdk_types::Address>,
-    /// Funded operator key files for distinct seated validators, in the Hashi CLI's PEM format.
-    /// Keys are loaded only on explicit pause invocation.
-    pub operator_key_paths: Vec<PathBuf>,
+    /// The validators the monitor votes for, each with a funded operator key.
+    pub operators: Vec<PauseOperator>,
+    /// Pause Hashi when a finding that autopauses is reported.
+    #[serde(default)]
+    pub autopause: bool,
 }
 
 impl PauseConfig {
@@ -71,6 +73,15 @@ impl PauseConfig {
         self.object_id
             .unwrap_or(hashi::constants::HASHI_MAINNET_OBJECT_ID)
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseOperator {
+    /// The validator to vote for, so another validator's delegation cannot block the key.
+    pub validator_address: sui_sdk_types::Address,
+    /// Its operator key file, loaded only when pausing.
+    pub key_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -96,6 +107,12 @@ impl SuiConfig {
 pub struct BtcConfig {
     /// Bitcoin JSON-RPC endpoint.
     pub rpc_url: String,
+
+    /// Esplora API of an independent Bitcoin source, such as
+    /// `https://mempool.space/api`. The deposit checks confirm the node's
+    /// answers on it, because whoever controls the node's peers can withhold
+    /// blocks from it.
+    pub reference_api_url: String,
 
     /// Optional HTTP headers for the JSON-RPC provider, such as the
     /// authorization a hosted node needs.
@@ -182,6 +199,8 @@ impl Config {
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
+                // Nothing listens here, so every reference lookup fails.
+                reference_api_url: "http://127.0.0.1:1".to_string(),
                 http_headers: BTreeMap::new(),
             },
             alert_mode: AlertMode::Strict,
