@@ -325,9 +325,34 @@ through the `UpdateConfig` proposal.
 The guardian's x-only BTC public key (32 bytes), pinned at launch
 (`finish_publish`). Every 2-of-2 deposit address derives from it, so it
 is write-once and not updatable through the `UpdateConfig` proposal. The
-guardian's URLs remain governable: `guardian_url`, its public endpoint, and
-`guardian_node_url`, the endpoint nodes call. A node resolves
-`guardian_node_url` once, so it picks up a change only after a restart.
+guardian's URLs, [`guardian_url`](#guardian_url) and
+[`guardian_node_url`](#guardian_node_url), remain governable.
+
+### `guardian_url`
+
+| | |
+|---|---|
+| **Key** | `guardian_url` |
+| **Type** | `string` |
+| **Default** | Set at launch (`finish_publish`) |
+
+The guardian's public endpoint: `/info`, the key-provisioner relay, and every
+other guardian call that is not a node RPC. Nodes don't dial it. Unlike
+`guardian_btc_public_key`, this key remains governable through the
+`UpdateConfig` proposal.
+
+### `guardian_node_url`
+
+| | |
+|---|---|
+| **Key** | `guardian_node_url` |
+| **Type** | `string` |
+| **Default** | Set at launch (`finish_publish`) |
+
+The guardian endpoint that nodes call, presenting their registered TLS key.
+This key remains governable through the `UpdateConfig` proposal. A node
+resolves `guardian_node_url` once, so it picks up a change only after a
+restart.
 
 ## Derived values
 
@@ -355,10 +380,10 @@ threshold. With defaults: `30,000 - 546 = 29,454 sats` per request.
 
 ## Adding a parameter without a package upgrade
 
-The Move package reads only the keys documented on this page; any other key
-is opaque to it, and the node software consumes it. To make a node-side
-setting governable, pass an `AddConfig` proposal naming the key, its initial
-value (which fixes the key's type for later updates), and the store: the epoch
-config when every node must agree on the value for the whole epoch, the
-instant config otherwise. A node reads an absent key as its built-in default,
-so you can add the key before or after the node release that consumes it.
+The Move package reads only the keys documented in the preceding sections; any
+other key is opaque to it, and the node software consumes it. To make a
+node-side setting governable, pass an `AddConfig` proposal naming the key, its
+initial value (which fixes the key's type for later updates), and the store: the
+epoch config when every node must agree on the value for the whole epoch, the
+instant config otherwise. A node reads an absent key as its built-in default, so
+you can add the key before or after the node release that consumes it.
