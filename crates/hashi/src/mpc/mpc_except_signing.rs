@@ -3906,6 +3906,7 @@ impl MpcManager {
             )?
             .to_verified()
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+            let receiver = mgr.create_avid_nonce_receiver(dealer, batch_index)?;
             let mut verified_echoes = Vec::new();
             for (addr, bundle) in &bundles {
                 let Some(echo) = bundle.echo.clone() else {
@@ -3914,13 +3915,14 @@ impl MpcManager {
                 let Some(sender) = mgr.committee.index_of(addr).map(|i| i as PartyId) else {
                     continue;
                 };
-                match mgr.verify_avid_nonce_echo(dealer, batch_index, sender, echo, &vote_cert) {
+                match Self::verify_avid_nonce_echo(&receiver, sender, echo, &vote_cert) {
                     Ok(verified) => verified_echoes.push(verified),
                     Err(e) => tracing::info!("Echo from {:?} failed to verify: {}", addr, e),
                 }
             }
             let mut rng = rand::thread_rng();
             match mgr.decode_avid_nonce_share(
+                &receiver,
                 dealer,
                 batch_index,
                 common.clone(),
@@ -4333,21 +4335,20 @@ impl MpcManager {
     }
 
     fn verify_avid_nonce_echo(
-        &self,
-        dealer: Address,
-        batch_index: u32,
+        receiver: &batch_avss_avid::Receiver,
         sender: PartyId,
         echo: batch_avss_avid::Echo,
         vote_cert: &VerifiedAvidVoteCert,
     ) -> MpcResult<batch_avss_avid::VerifiedEcho> {
-        let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         receiver
             .verify_avid_echo_message(echo, sender, vote_cert)
             .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn decode_avid_nonce_share(
         &mut self,
+        receiver: &batch_avss_avid::Receiver,
         dealer: Address,
         batch_index: u32,
         common: batch_avss_avid::AvssCommonMessage,
@@ -4358,7 +4359,6 @@ impl MpcManager {
         batch_avss_avid::DecodeAndDecryptOutcome,
         batch_avss_avid::VerifiedAvssCommonMessage,
     )> {
-        let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         let common_hash = MessagesHash::from(common.hash().digest);
         let verified_common = receiver
             .verify_common_message(vote_cert, common)
