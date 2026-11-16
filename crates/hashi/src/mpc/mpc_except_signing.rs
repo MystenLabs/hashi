@@ -2976,6 +2976,22 @@ impl MpcManager {
             })
     }
 
+    fn get_and_cache_avid_round_state(
+        &mut self,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> MpcResult<Option<Arc<AvidRoundState>>> {
+        let state = self.get_avid_round_state(batch_index, dealer)?;
+        let key = (batch_index, *dealer);
+        if let Some(state) = &state
+            && !self.current_avid_round_state.contains_key(&key)
+        {
+            self.current_avid_round_state.insert(key, Arc::clone(state));
+            self.cap_avid_dealer_state(*dealer, batch_index);
+        }
+        Ok(state)
+    }
+
     fn avid_round_verified_common(
         &mut self,
         dealer: Address,
@@ -3051,7 +3067,7 @@ impl MpcManager {
                     });
                 }
                 match (
-                    self.get_avid_round_state(batch_index, &sender)?,
+                    self.get_and_cache_avid_round_state(batch_index, &sender)?,
                     optimistic_message,
                 ) {
                     (None, Some(msg)) => {
