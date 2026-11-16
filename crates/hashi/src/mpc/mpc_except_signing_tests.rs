@@ -21017,8 +21017,13 @@ fn a_callers_fifth_concurrent_retrieval_waits_for_one_of_its_four_lock_runs() {
         .unwrap();
 
     let setup = TestSetup::new(4);
-    let manager = setup.create_manager(0);
+    let mut manager = setup.create_manager(0);
     let epoch = manager.mpc_config.epoch;
+    let cached = setup.address(0);
+    let dealer_message = manager.create_dealer_message(&mut rand::thread_rng());
+    manager
+        .persist_and_cache_dkg_message(epoch, cached, &dealer_message)
+        .unwrap();
 
     let tmpdir = tempfile::Builder::new().tempdir().unwrap();
     let mut config = crate::config::Config::new_for_testing();
@@ -21036,7 +21041,7 @@ fn a_callers_fifth_concurrent_retrieval_waits_for_one_of_its_four_lock_runs() {
     let retrieve = |requester: Address| {
         let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
             epoch: Some(epoch),
-            dealer: Some(setup.address(2).to_string()),
+            dealer: Some(cached.to_string()),
             protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
             batch_index: None,
         });
@@ -21079,12 +21084,7 @@ fn a_callers_fifth_concurrent_retrieval_waits_for_one_of_its_four_lock_runs() {
         fifth_waited,
         "a fifth retrieval ran while its caller's four runs were busy"
     );
-    assert!(
-        responses.iter().all(|response| response
-            .as_ref()
-            .is_err_and(|status| status.code() == tonic::Code::NotFound)),
-        "{responses:?}"
-    );
+    assert!(responses.iter().all(Result::is_ok), "{responses:?}");
 }
 
 #[test]
