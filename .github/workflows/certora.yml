@@ -1,0 +1,55 @@
+name: Certora
+on:
+  pull_request:
+    paths:
+      - 'packages/hashi/**'
+      - 'certora/**'
+      - '.github/workflows/certora.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  # Keep in step with move.yml.
+  SUIUP_PIN: v0.0.14
+  SUI_PIN: mainnet-1.73.2
+jobs:
+  check-key:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.key.outputs.ok }}
+    steps:
+      - id: key
+        env:
+          CERTORAKEY: ${{ secrets.CERTORAKEY }}
+        run: |
+          if [ -n "$CERTORAKEY" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"
+          else echo "::warning::CERTORAKEY not set, skipping Certora"; echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+  verify:
+    needs: check-key
+    if: needs.check-key.outputs.ok == 'true'
+    name: Certora ${{ matrix.conf }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        conf: [deposit_full, withdraw_full, proposal_full, solvency_full]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --tag "$SUIUP_PIN" --locked
+      - run: suiup install "sui@$SUI_PIN" -y
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: pip install certora-cli
+      - run: bash certora/patches/apply_patches.sh
+      - working-directory: certora
+        env:
+          CERTORAKEY: ${{ secrets.CERTORAKEY }}
+        run: certoraSuiProver confs/${{ matrix.conf }}.conf --server production --wait_for_results all
