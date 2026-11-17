@@ -1,0 +1,14 @@
+[package]
+name = "deposit"
+edition = "2024.beta"
+
+[dependencies]
+MoveStdlib = { override = true, git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "framework/testnet" }
+Sui = { override = true, git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+SuiSystem = { override = true, git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-system", rev = "framework/testnet" }
+hashi = { local = "../../../packages/hashi" }
+cvlm = { git = "https://github.com/Certora/cvl-move-proto.git", subdir = "cvlm", rev = "nisarg/sui-v1.55.0" }
+certora_sui_summaries = { git = "https://github.com/Certora/cvl-move-proto.git", subdir = "certora_sui_summaries",  rev = "nisarg/sui-v1.55.0" }
+
+[addresses]
+deposit = "0x0"
