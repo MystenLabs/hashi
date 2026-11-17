@@ -146,9 +146,8 @@ pub struct Auditor {
     utxo_pool: UtxoPool,
     /// Spends waiting for the Sui cursor, by outpoint.
     suspect_spends: HashMap<OutPoint, SuspectSpend>,
-    /// Deposit approvals no source has settled yet, by outpoint, with their
-    /// deadline. See `approval_checks`.
-    unsettled_approvals: HashMap<OutPoint, (SuiDepositApprovedEvent, UnixSeconds)>,
+    /// Deposit approvals awaiting verification, by Sui request ID, with their deadline.
+    unsettled_approvals: HashMap<Address, (SuiDepositApprovedEvent, UnixSeconds)>,
     rpc_pollers: RpcPollers,
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.

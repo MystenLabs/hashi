@@ -65,11 +65,10 @@ fn is_fresh(event: &SuiDepositApprovedEvent, now: UnixSeconds, delay: u64) -> bo
 }
 
 impl Auditor {
-    /// Keep `event`, read at `now`, until a source settles it. For each
-    /// outpoint, keep the first approval.
+    /// Keep each request's first approval and deadline, even if another request names the same output.
     pub(super) fn note_approval(&mut self, event: &SuiDepositApprovedEvent, now: UnixSeconds) {
         self.unsettled_approvals
-            .entry(OutPoint::from(event.deposit_id))
+            .entry(event.request_id)
             .or_insert_with(|| (event.clone(), now.saturating_add(APPROVAL_DEADLINE)));
     }
 
@@ -84,48 +83,48 @@ impl Auditor {
     ) -> Vec<MonitorFinding> {
         let delay = self.rpc_pollers.deposit_delay_secs;
         let mut findings = Vec::new();
-        self.unsettled_approvals
-            .retain(|outpoint, (event, deadline)| {
-                let pays = |amount: u64, script_pubkey: &ScriptBuf| {
-                    amount == event.amount && *script_pubkey == event.script_pubkey
-                };
-                let (node_spent, node_paid) = match node.get(outpoint) {
-                    Some(OutpointState::Spent { output }) => {
-                        (true, pays(output.value.to_sat(), &output.script_pubkey))
-                    }
-                    Some(OutpointState::Unspent { output, .. }) => {
-                        (false, pays(output.value.to_sat(), &output.script_pubkey))
-                    }
-                    Some(OutpointState::Missing) | None => (false, false),
-                };
-                let (reference_spent, reference_paid) = match reference.get(outpoint) {
-                    Some(ReferenceOutput::Spent {
-                        amount,
-                        script_pubkey,
-                    }) => (true, pays(*amount, script_pubkey)),
-                    Some(ReferenceOutput::Unspent {
-                        amount,
-                        script_pubkey,
-                    }) => (false, pays(*amount, script_pubkey)),
-                    Some(ReferenceOutput::Missing) | None => (false, false),
-                };
-                let unbacked = |reason| MonitorFinding::DepositUnbacked {
-                    sui: event.clone(),
-                    reason,
-                };
-                if (node_spent || reference_spent) && is_fresh(event, finished, delay) {
-                    findings.push(unbacked(DepositUnbackedReason::Spent));
-                    return false;
+        self.unsettled_approvals.retain(|_, (event, deadline)| {
+            let outpoint = OutPoint::from(event.deposit_id);
+            let pays = |amount: u64, script_pubkey: &ScriptBuf| {
+                amount == event.amount && *script_pubkey == event.script_pubkey
+            };
+            let (node_spent, node_paid) = match node.get(&outpoint) {
+                Some(OutpointState::Spent { output }) => {
+                    (true, pays(output.value.to_sat(), &output.script_pubkey))
                 }
-                if node_paid || reference_paid {
-                    return false;
+                Some(OutpointState::Unspent { output, .. }) => {
+                    (false, pays(output.value.to_sat(), &output.script_pubkey))
                 }
-                if finished >= *deadline {
-                    findings.push(unbacked(DepositUnbackedReason::Unverified));
-                    return false;
-                }
-                true
-            });
+                Some(OutpointState::Missing) | None => (false, false),
+            };
+            let (reference_spent, reference_paid) = match reference.get(&outpoint) {
+                Some(ReferenceOutput::Spent {
+                    amount,
+                    script_pubkey,
+                }) => (true, pays(*amount, script_pubkey)),
+                Some(ReferenceOutput::Unspent {
+                    amount,
+                    script_pubkey,
+                }) => (false, pays(*amount, script_pubkey)),
+                Some(ReferenceOutput::Missing) | None => (false, false),
+            };
+            let unbacked = |reason| MonitorFinding::DepositUnbacked {
+                sui: event.clone(),
+                reason,
+            };
+            if (node_spent || reference_spent) && is_fresh(event, finished, delay) {
+                findings.push(unbacked(DepositUnbackedReason::Spent));
+                return false;
+            }
+            if node_paid || reference_paid {
+                return false;
+            }
+            if finished >= *deadline {
+                findings.push(unbacked(DepositUnbackedReason::Unverified));
+                return false;
+            }
+            true
+        });
         findings
     }
 
@@ -135,8 +134,17 @@ impl Auditor {
         if self.unsettled_approvals.is_empty() {
             return Vec::new();
         }
-        let outpoints = self.unsettled_approvals.keys().copied().collect::<Vec<_>>();
-        tracing::info!(approvals = outpoints.len(), "checking deposit approvals");
+        let mut outpoints: Vec<_> = self
+            .unsettled_approvals
+            .values()
+            .map(|(event, _)| OutPoint::from(event.deposit_id))
+            .collect();
+        outpoints.sort_unstable();
+        outpoints.dedup();
+        tracing::info!(
+            approvals = self.unsettled_approvals.len(),
+            "checking deposit approvals"
+        );
         let node = match tip_height {
             Some(tip_height) => self
                 .rpc_pollers
@@ -178,9 +186,46 @@ mod tests {
         let late = approval_of(&deposit_request(), now - 3_600);
         auditor.ingest(MonitorEvent::DepositApproved(late.clone()));
         assert_eq!(
-            auditor.unsettled_approvals[&OutPoint::from(late.deposit_id)].1,
+            auditor.unsettled_approvals[&late.request_id].1,
             now + APPROVAL_DEADLINE
         );
+    }
+
+    #[tokio::test]
+    async fn approvals_for_the_same_output_are_checked_separately() {
+        let mut auditor = auditor_with_pool().await;
+        let paid = approval_of(&deposit_request(), 1_000);
+        let other = SuiDepositApprovedEvent {
+            request_id: sui_sdk_types::Address::new([2; 32]),
+            script_pubkey: crate::test_utils::p2wpkh(0x55),
+            ..paid.clone()
+        };
+        auditor.note_approval(&paid, 1_000);
+        auditor.note_approval(&other, 1_001);
+        let reference = HashMap::from([(
+            OutPoint::from(paid.deposit_id),
+            ReferenceOutput::Unspent {
+                amount: paid.amount,
+                script_pubkey: paid.script_pubkey,
+            },
+        )]);
+        let deadline = 1_001 + APPROVAL_DEADLINE;
+        let node = HashMap::new();
+        assert!(
+            auditor
+                .judge_approvals(&node, &reference, deadline - 1)
+                .is_empty()
+        );
+        assert!(!auditor.unsettled_approvals.contains_key(&paid.request_id));
+        let findings = auditor.judge_approvals(&node, &reference, deadline);
+        assert_eq!(
+            findings,
+            [MonitorFinding::DepositUnbacked {
+                sui: other,
+                reason: DepositUnbackedReason::Unverified,
+            }]
+        );
+        assert!(findings[0].autopauses());
     }
 
     #[tokio::test]
