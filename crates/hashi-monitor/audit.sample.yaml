@@ -48,6 +48,8 @@ btc:
   # Cargo sets CARGO_PKG_NAME for the tests that parse this file; a deployment
   # names its own variable.
   rpc_url: "env:CARGO_PKG_NAME"
+  # Esplora API of an independent Bitcoin source, on the same network.
+  reference_api_url: "https://mempool.space/signet/api"
   # Optional headers for hosted JSON-RPC providers:
   # http_headers:
   #   Origin: "https://example.com"
@@ -63,6 +65,9 @@ btc:
 #   transaction_rpc_url: "https://fullnode.testnet.sui.io:443"
 #   # Defaults to mainnet; set for other deployments.
 #   object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
-#   # Operator key files for signing pause transactions.
-#   operator_key_paths:
-#     - "/path/to/operator.key"
+#   # Validators to vote for, with their operator key files.
+#   operators:
+#     - validator_address: "0x0000000000000000000000000000000000000000000000000000000000000000"
+#       key_path: "/path/to/operator.key"
+#   # Pause the bridge when a finding that autopauses is reported.
+#   autopause: true
