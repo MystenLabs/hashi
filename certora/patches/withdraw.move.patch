@@ -1,0 +1,124 @@
+diff --git a/packages/hashi/sources/btc/withdraw.move b/packages/hashi/sources/btc/withdraw.move
+index 09bc13c5..95dfe4c8 100644
+--- a/packages/hashi/sources/btc/withdraw.move
++++ b/packages/hashi/sources/btc/withdraw.move
+@@ -17,7 +17,7 @@ use hashi::{
+     config::Config,
+     hashi::Hashi,
+     utxo::UtxoId,
+-    withdrawal_queue::OutputUtxo
++    withdrawal_queue::{OutputUtxo, WithdrawalTransaction}
+ };
+ use sui::{balance::Balance, clock::Clock, random::Random};
+ 
+@@ -102,7 +102,7 @@ public struct WithdrawalConfirmationMessage has copy, drop, store {
+ /// still feed in a `Balance<BTC>` produced by earlier commands (e.g.
+ /// `balance::redeem_funds` or a swap), since `Balance` has `store` and is
+ /// therefore never a hot argument under the private-entry rules.
+-entry fun request_withdrawal(
++public entry fun request_withdrawal(
+     hashi: &mut Hashi,
+     clock: &Clock,
+     btc: Balance<BTC>,
+@@ -147,7 +147,7 @@ entry fun request_withdrawal(
+ /// `balance::send_funds` back to the sender, or into a new request); an
+ /// `entry` function may return a value without `drop` as long as a later
+ /// command consumes it.
+-entry fun cancel_withdrawal(
++public entry fun cancel_withdrawal(
+     hashi: &mut Hashi,
+     request_id: address,
+     clock: &Clock,
+@@ -183,7 +183,7 @@ entry fun cancel_withdrawal(
+     btc
+ }
+ 
+-entry fun approve_request(
++public entry fun approve_request(
+     hashi: &mut Hashi,
+     request_id: address,
+     cert: CommitteeSignature,
+@@ -205,7 +205,7 @@ entry fun approve_request(
+ // NOTE: request_ids and outputs must come presorted, so that request_ids[i] matches outputs[i].
+ // Any change outputs must be the trailing outputs in `outputs`, after the
+ // per-request outputs.
+-entry fun commit_withdrawal_tx(
++public entry fun commit_withdrawal_tx(
+     hashi: &mut Hashi,
+     request_ids: vector<address>,
+     selected_utxos: vector<UtxoId>,
+@@ -265,9 +265,7 @@ entry fun commit_withdrawal_tx(
+     let withdrawal_txn_id = withdrawal_txn.withdrawal_txn_id();
+ 
+     // Lock input UTXOs to this withdrawal transaction.
+-    withdrawal_txn.withdrawal_txn_inputs().do_ref!(|utxo| {
+-        hashi.bitcoin_mut().utxo_pool_mut().lock(utxo.id(), withdrawal_txn_id);
+-    });
++    lock_input_utxos(hashi, &withdrawal_txn, withdrawal_txn_id);
+ 
+     // Commit requests in place: drain BTC and link each to this transaction.
+     let btc_to_burn = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests(&withdrawal_txn);
+@@ -277,16 +275,32 @@ entry fun commit_withdrawal_tx(
+ 
+     // Insert the pending change UTXOs into the pool immediately so they can be
+     // selected by subsequent transactions before this one confirms on Bitcoin.
+-    let change_utxos = hashi::withdrawal_queue::build_change_utxos(&withdrawal_txn);
+-    change_utxos.do!(|change_utxo| {
+-        hashi.bitcoin_mut().utxo_pool_mut().insert_pending(change_utxo, withdrawal_txn_id);
+-    });
++    insert_change_utxos(hashi, &withdrawal_txn, withdrawal_txn_id);
+ 
+     withdrawal_txn.emit_withdrawal_picked_for_processing();
+ 
+     hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(withdrawal_txn);
+ }
+ 
++/// Lock every input UTXO of `withdrawal_txn` to `withdrawal_txn_id`. Split
++/// out of `commit_withdrawal_tx` so it can be summarized as a single unit —
++/// see `solvency::summaries_utxo_pool::lock_input_utxos_summary`.
++fun lock_input_utxos(hashi: &mut Hashi, withdrawal_txn: &WithdrawalTransaction, withdrawal_txn_id: address) {
++    withdrawal_txn.withdrawal_txn_inputs().do_ref!(|utxo| {
++        hashi.bitcoin_mut().utxo_pool_mut().lock(utxo.id(), withdrawal_txn_id);
++    });
++}
++
++/// Insert every change UTXO of `withdrawal_txn` into the pool as pending.
++/// Split out of `commit_withdrawal_tx` so it can be summarized as a single
++/// unit — see `solvency::summaries_utxo_pool::insert_change_utxos_summary`.
++fun insert_change_utxos(hashi: &mut Hashi, withdrawal_txn: &WithdrawalTransaction, withdrawal_txn_id: address) {
++    let change_utxos = hashi::withdrawal_queue::build_change_utxos(withdrawal_txn);
++    change_utxos.do!(|change_utxo| {
++        hashi.bitcoin_mut().utxo_pool_mut().insert_pending(change_utxo, withdrawal_txn_id);
++    });
++}
++
+ /// Record a chunk of completed per-input MPC signatures into the withdrawal's
+ /// signing batch (out-of-order, first-writer-wins). Cert-gated over exactly the
+ /// `(withdrawal_id, indices, signatures)` written, by the current committee.
+@@ -317,7 +331,7 @@ entry fun commit_input_signatures(
+ /// guardian signatures and flip the broadcast gate. The cert binds the full MPC
+ /// signature set (read from the batch) together with the guardian signatures, so
+ /// a malicious leader cannot pair valid MPC sigs with garbage guardian sigs.
+-entry fun finalize_withdrawal(
++public entry fun finalize_withdrawal(
+     hashi: &mut Hashi,
+     withdrawal_id: address,
+     guardian_signatures: vector<vector<u8>>,
+@@ -349,7 +363,7 @@ entry fun finalize_withdrawal(
+         .finalize_withdrawal_txn(withdrawal_id, guardian_signatures, clock);
+ }
+ 
+-entry fun confirm_withdrawal(
++public entry fun confirm_withdrawal(
+     hashi: &mut Hashi,
+     withdrawal_id: address,
+     cert: CommitteeSignature,
+@@ -433,7 +447,7 @@ entry fun archive_confirmed_withdrawals(hashi: &mut Hashi, withdrawal_ids: vecto
+ ///
+ /// Garbage collection: deliberately NOT gated on pause/reconfig — it moves
+ /// no funds and must stay callable during an emergency pause.
+-entry fun archive_withdrawal_requests(
++public entry fun archive_withdrawal_requests(
+     hashi: &mut Hashi,
+     withdrawal_id: address,
+     request_ids: vector<address>,

@@ -1,0 +1,39 @@
+diff --git a/packages/hashi/sources/core/config/config.move b/packages/hashi/sources/core/config/config.move
+index 39afb38f..9b0654f1 100644
+--- a/packages/hashi/sources/core/config/config.move
++++ b/packages/hashi/sources/core/config/config.move
+@@ -128,7 +128,7 @@ public(package) fun is_governable_key(key: &String): bool {
+ 
+ // === Core Accessors ===
+ 
+-public(package) fun paused(self: &Config): bool {
++public fun paused(self: &Config): bool {
+     self.get(PAUSED_KEY).as_bool()
+ }
+ 
+@@ -153,7 +153,7 @@ public(package) fun guardian_node_url(self: &Config): Option<String> {
+     self.try_get(GUARDIAN_NODE_URL_KEY).map!(|v| v.as_string())
+ }
+ 
+-public(package) fun guardian_btc_public_key(self: &Config): Option<vector<u8>> {
++public fun guardian_btc_public_key(self: &Config): Option<vector<u8>> {
+     self.try_get(GUARDIAN_BTC_PUBLIC_KEY_KEY).map!(|v| v.as_bytes())
+ }
+ 
+@@ -183,14 +183,14 @@ public(package) fun set_guardian_btc_public_key(self: &mut Config, btc_public_ke
+     self.upsert(GUARDIAN_BTC_PUBLIC_KEY_KEY, config_value::new_bytes(btc_public_key));
+ }
+ 
+-public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {
++public fun emergency_pause_threshold_bps(self: &Config): u64 {
+     self
+         .try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY)
+         .map!(|v| v.as_u64())
+         .destroy_or!(DEFAULT_EMERGENCY_PAUSE_THRESHOLD_BPS)
+ }
+ 
+-public(package) fun emergency_unpause_threshold_bps(self: &Config): u64 {
++public fun emergency_unpause_threshold_bps(self: &Config): u64 {
+     self
+         .try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY)
+         .map!(|v| v.as_u64())

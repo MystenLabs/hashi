@@ -1,0 +1,33 @@
+diff --git a/packages/hashi/sources/core/versioning.move b/packages/hashi/sources/core/versioning.move
+index f2e3a93a..5b438978 100644
+--- a/packages/hashi/sources/core/versioning.move
++++ b/packages/hashi/sources/core/versioning.move
+@@ -61,12 +61,18 @@ public(package) fun assert_version_enabled(self: &Versioning) {
+     assert!(self.enabled_versions.contains(&PACKAGE_VERSION), EVersionDisabled);
+ }
+ 
++/// The version constant this package build runs as, i.e. the version
++/// `assert_version_enabled` checks.
++public fun package_version(): u64 {
++    PACKAGE_VERSION
++}
++
+ public(package) fun disable_version(self: &mut Versioning, version: u64) {
+     assert!(version != PACKAGE_VERSION, EDisableCurrentVersion);
+     self.enabled_versions.remove(&version);
+ }
+ 
+-public(package) fun is_version_enabled(self: &Versioning, version: u64): bool {
++public fun is_version_enabled(self: &Versioning, version: u64): bool {
+     self.enabled_versions.contains(&version)
+ }
+ 
+@@ -108,7 +114,7 @@ public(package) fun set_upgrade_cap(self: &mut Versioning, upgrade_cap: UpgradeC
+     self.upgrade_cap.fill(upgrade_cap);
+ }
+ 
+-public(package) fun has_upgrade_cap(self: &Versioning): bool {
++public fun has_upgrade_cap(self: &Versioning): bool {
+     self.upgrade_cap.is_some()
+ }
+ 

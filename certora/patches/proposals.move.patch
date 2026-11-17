@@ -1,0 +1,41 @@
+diff --git a/packages/hashi/sources/core/proposal/proposals.move b/packages/hashi/sources/core/proposal/proposals.move
+index df04a3cb..a177c9a8 100644
+--- a/packages/hashi/sources/core/proposal/proposals.move
++++ b/packages/hashi/sources/core/proposal/proposals.move
+@@ -31,7 +31,7 @@ public(package) fun create(ctx: &mut TxContext): Proposals {
+     }
+ }
+ 
+-public(package) fun active(self: &Proposals): &ObjectBag {
++public fun active(self: &Proposals): &ObjectBag {
+     &self.active
+ }
+ 
+@@ -39,10 +39,26 @@ public(package) fun active_mut(self: &mut Proposals): &mut ObjectBag {
+     &mut self.active
+ }
+ 
+-public(package) fun executed(self: &Proposals): &ObjectBag {
++public fun executed(self: &Proposals): &ObjectBag {
+     &self.executed
+ }
+ 
+ public(package) fun executed_mut(self: &mut Proposals): &mut ObjectBag {
+     &mut self.executed
+ }
++
++// ~~~~~~~ Membership Accessors ~~~~~~~
++
++/// Is `proposal_id` an active (created, not yet executed) proposal?
++///
++/// Both bags are keyed by `ID` (`proposal::create`, `proposal::execute`).
++/// Dynamic-field keys are type-tagged, so a lookup by
++/// `id.to_address()` would silently be `false` forever.
++public fun contains_active(self: &Proposals, proposal_id: ID): bool {
++    self.active.contains(proposal_id)
++}
++
++/// Has `proposal_id` executed? See `contains_active` for the key-type note.
++public fun contains_executed(self: &Proposals, proposal_id: ID): bool {
++    self.executed.contains(proposal_id)
++}

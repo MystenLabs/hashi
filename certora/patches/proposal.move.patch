@@ -1,0 +1,205 @@
+diff --git a/packages/hashi/sources/core/proposal/proposal.move b/packages/hashi/sources/core/proposal/proposal.move
+index 6c38599e..aad141d9 100644
+--- a/packages/hashi/sources/core/proposal/proposal.move
++++ b/packages/hashi/sources/core/proposal/proposal.move
+@@ -102,7 +102,7 @@ public struct QuorumReached<phantom T> has copy, drop {
+ // `ctx` stays `&mut` (here and in `remove_vote`) so future versions can
+ // create objects without a signature change.
+ #[allow(unused_mut_parameter)]
+-entry fun vote<T: store>(
++public entry fun vote<T: store>(
+     hashi: &mut Hashi,
+     validator_address: address,
+     proposal_id: ID,
+@@ -134,7 +134,7 @@ entry fun vote<T: store>(
+ }
+ 
+ #[allow(unused_mut_parameter)]
+-entry fun remove_vote<T: store>(
++public entry fun remove_vote<T: store>(
+     hashi: &mut Hashi,
+     validator_address: address,
+     proposal_id: ID,
+@@ -144,12 +144,7 @@ entry fun remove_vote<T: store>(
+     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
+ 
+     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
+-    let index = proposal
+-        .votes
+-        .find_index!(|v| v == &validator_address)
+-        .destroy_or!(abort ENoVoteFound);
+-
+-    proposal.votes.remove(index);
++    proposal.remove_vote_from(validator_address);
+     sui::event::emit(VoteRemoved<T> {
+         proposal_id: proposal.id.to_inner(),
+         voter: validator_address,
+@@ -160,7 +155,7 @@ entry fun remove_vote<T: store>(
+ /// proposal can be neither voted nor executed, so nothing is lost. The
+ /// payload is returned for the caller to discard; the `drop` bound states
+ /// what every proposal payload already has (`execute` requires it too).
+-entry fun delete_expired<T: drop + store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
++public entry fun delete_expired<T: drop + store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
+     hashi.versioning().assert_version_enabled();
+     // Executed proposals are archived in the executed bag and must
+     // never be deletable, even after they expire. Refuse explicitly so
+@@ -176,7 +171,7 @@ entry fun delete_expired<T: drop + store>(hashi: &mut Hashi, proposal_id: ID, cl
+ 
+ // ~~~~~~~ Package Functions ~~~~~~~
+ 
+-public(package) fun create<T: store>(
++public fun create<T: store>(
+     hashi: &mut Hashi,
+     validator_address: address,
+     data: T,
+@@ -235,7 +230,7 @@ public(package) fun create<T: store>(
+     proposal_id
+ }
+ 
+-public(package) fun execute<T: copy + drop + store>(
++public fun execute<T: copy + drop + store>(
+     hashi: &mut Hashi,
+     proposal_id: ID,
+     clock: &Clock,
+@@ -264,9 +259,7 @@ public(package) fun execute<T: copy + drop + store>(
+ }
+ 
+ public(package) fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
+-    let valid_voting_power = proposal.votes.fold!(0, |acc, voter| {
+-        acc + hashi.current_committee().get_member_weight(&voter)
+-    });
++    let valid_voting_power = sum_valid_voting_power(&proposal.votes, hashi);
+ 
+     let total_weight = hashi.current_committee().total_weight();
+     let required = threshold::weight_threshold(total_weight, proposal.quorum_threshold_bps);
+@@ -288,10 +281,129 @@ public(package) fun delete<T>(proposal: Proposal<T>): T {
+     data
+ }
+ 
+-public(package) fun votes<T>(proposal: &Proposal<T>): &vector<address> {
++public fun votes<T>(proposal: &Proposal<T>): &vector<address> {
+     &proposal.votes
+ }
+ 
++// ~~~~~~~ Accessors ~~~~~~~
++
++/// Borrow an active (created, not yet executed) proposal. Lives here
++/// rather than on `Proposals` because `Proposal<T>` is defined in this
++/// module and `hashi::proposals` cannot depend on it without a cycle
++/// (`proposal` -> `hashi` -> `proposals`).
++public fun borrow_active<T: store>(hashi: &Hashi, proposal_id: ID): &Proposal<T> {
++    hashi.proposals().active().borrow(proposal_id)
++}
++
++/// The proposal's own object id, for checking that the bag key it is
++/// stored under matches it.
++public fun proposal_id<T>(proposal: &Proposal<T>): ID {
++    proposal.id.to_inner()
++}
++
++/// Clock timestamp pinned at creation (`create`, :168/:175). Written once
++/// and never assigned again; the sole input to `is_expired` besides the
++/// clock and `MAX_PROPOSAL_DURATION_MS`.
++public fun proposal_created_timestamp_ms<T>(proposal: &Proposal<T>): u64 {
++    proposal.created_timestamp_ms
++}
++
++/// The seven-day expiry window, exposed so a spec can restate `is_expired`
++/// without hardcoding the constant. Deliberately a compile-time constant
++/// rather than a config key — see PROPOSAL_GOVERNANCE.md G3.
++public fun max_proposal_duration_ms(): u64 {
++    MAX_PROPOSAL_DURATION_MS
++}
++
++/// Borrow an archived (executed) proposal. `executed` is keyed by `ID`,
++/// like `active` (see `execute`).
++public fun borrow_executed<T: store>(hashi: &Hashi, proposal_id: ID): &Proposal<T> {
++    hashi.proposals().executed().borrow(proposal_id)
++}
++
++/// `None` until the proposal executes; set once at `execute` (:207).
++public fun proposal_executed_timestamp_ms<T>(proposal: &Proposal<T>): Option<u64> {
++    proposal.executed_timestamp_ms
++}
++
++/// Pinned at creation from the proposal type's own threshold; never
++/// updated afterwards.
++public fun proposal_quorum_threshold_bps<T>(proposal: &Proposal<T>): u64 {
++    proposal.quorum_threshold_bps
++}
++
++/// The aggregate weight the **current** committee assigns to this
++/// proposal's voters — `quorum_reached`'s left-hand side (:214), exposed
++/// so a spec can assert the quorum *arithmetic* rather than merely
++/// re-assert the predicate. Reads live committee state on every call, like
++/// `quorum_reached` itself; nothing about it is cached on the proposal.
++public fun proposal_voting_weight<T>(proposal: &Proposal<T>, hashi: &Hashi): u64 {
++    sum_valid_voting_power(&proposal.votes, hashi)
++}
++
++/// The validator address that created the proposal (and auto-voted).
++public fun proposal_creator<T>(proposal: &Proposal<T>): address {
++    proposal.creator
++}
++
++/// Has `validator_address` voted on this proposal? A predicate over
++/// `votes`, which is cheaper for a spec to reason about than the raw
++/// vector `votes()` hands back.
++public fun proposal_has_vote<T>(proposal: &Proposal<T>, validator_address: address): bool {
++    proposal.votes.contains(&validator_address)
++}
++
++/// Number of votes recorded on this proposal.
++public fun proposal_vote_count<T>(proposal: &Proposal<T>): u64 {
++    proposal.votes.length()
++}
++
++/// Mutable access to the vote vector, so a spec can implement
++/// `remove_vote_from`'s summary. Patch-only in spirit: nothing in the
++/// protocol should hand out a `&mut` to `votes`, since it bypasses the
++/// duplicate guard at :99 that keeps `quorum_reached` from double-counting.
++public fun proposal_votes_mut<T>(proposal: &mut Proposal<T>): &mut vector<address> {
++    &mut proposal.votes
++}
++
++/// The voter recorded at `index`. Positional rather than a membership
++/// test, which matters to specs: `std::vector::contains` is replaced by a
++/// ghost in `certora::std_vector_summaries`, so it cannot observe an
++/// element appended during the same trace. Indexing is not summarized.
++public fun proposal_vote_at<T>(proposal: &Proposal<T>, index: u64): address {
++    proposal.votes[index]
++}
++
++// ~~~~~~~ Private Functions ~~~~~~~
++
++/// Find `validator_address` in `votes` and drop it, aborting
++/// `ENoVoteFound` if it isn't there. Split out of `remove_vote` so it can
++/// be summarized as a single unit — see
++/// `proposal::summaries_proposal::remove_vote_from_summary`. Two loops
++/// disappear with it: the `find_index!` walk, and `vector::remove`'s
++/// shift of every element after `index`.
++fun remove_vote_from<T>(proposal: &mut Proposal<T>, validator_address: address) {
++    let index = proposal
++        .votes
++        .find_index!(|v| v == &validator_address)
++        .destroy_or!(abort ENoVoteFound);
++
++    proposal.votes.remove(index);
++}
++
++/// Total weight the current committee assigns to `votes`. Non-members
++/// contribute 0 (`committee::get_member_weight`'s `destroy_or!(0)`), which
++/// is what makes votes cast by a previous epoch's committee harmless.
++/// Split out of `quorum_reached` so it can be summarized as a single unit
++/// — see `proposal::summaries_proposal::sum_valid_voting_power_summary`.
++fun sum_valid_voting_power(votes: &vector<address>, hashi: &Hashi): u64 {
++    let mut valid_voting_power = 0;
++    votes.do_ref!(|voter| {
++        valid_voting_power = valid_voting_power + hashi.current_committee().get_member_weight(voter);
++    });
++    valid_voting_power
++}
++
+ // ~~~~~~~ Test Helpers ~~~~~~~
+ 
+ #[test_only]

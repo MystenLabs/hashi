@@ -1,0 +1,28 @@
+diff --git a/packages/hashi/sources/core/proposal/types/emergency_pause.move b/packages/hashi/sources/core/proposal/types/emergency_pause.move
+index 8a8a1dda..2c43feab 100644
+--- a/packages/hashi/sources/core/proposal/types/emergency_pause.move
++++ b/packages/hashi/sources/core/proposal/types/emergency_pause.move
+@@ -20,7 +20,7 @@ public struct EmergencyPause has copy, drop, store {
+ // ~~~~~~~ Entry Functions ~~~~~~~
+ 
+ /// Private `entry`: see the visibility note in `hashi::proposal`.
+-entry fun propose(
++public entry fun propose(
+     hashi: &mut Hashi,
+     validator_address: address,
+     pause: bool,
+@@ -45,8 +45,13 @@ entry fun propose(
+     )
+ }
+ 
++/// The payload's pause flag: `true` pauses, `false` unpauses.
++public fun emergency_pause_flag(self: &EmergencyPause): bool {
++    self.pause
++}
++
+ /// Private `entry`: see the visibility note in `hashi::proposal`.
+-entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
++public entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
+     hashi.versioning().assert_version_enabled();
+     let EmergencyPause { pause } = proposal::execute(hashi, proposal_id, clock);
+     hashi.config_mut().set_paused(pause);

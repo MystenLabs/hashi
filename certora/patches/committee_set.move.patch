@@ -1,0 +1,71 @@
+diff --git a/packages/hashi/sources/core/committee/committee_set.move b/packages/hashi/sources/core/committee/committee_set.move
+index e0014cf6..3a44a890 100644
+--- a/packages/hashi/sources/core/committee/committee_set.move
++++ b/packages/hashi/sources/core/committee/committee_set.move
+@@ -574,7 +574,7 @@ fun start_reconfig_from_voting_powers(
+ 
+ /// Whether a completed handoff is stored for `from_epoch`, i.e. whether a
+ /// reconfiguration out of that epoch already activated.
+-public(package) fun has_committee_handoff(self: &CommitteeSet, from_epoch: u64): bool {
++public fun has_committee_handoff(self: &CommitteeSet, from_epoch: u64): bool {
+     self
+         .committees
+         .contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey {
+@@ -603,7 +603,7 @@ public(package) fun insert_committee_handoff(
+ }
+ 
+ /// Return the current epoch.
+-public(package) fun epoch(self: &CommitteeSet): u64 {
++public fun epoch(self: &CommitteeSet): u64 {
+     self.epoch
+ }
+ 
+@@ -611,11 +611,11 @@ public(package) fun current_committee(self: &CommitteeSet): &Committee {
+     &self.committees[self.epoch()]
+ }
+ 
+-public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
++public fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
+     &self.committees[epoch]
+ }
+ 
+-public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
++public fun has_committee(self: &CommitteeSet, epoch: u64): bool {
+     self.committees.contains_with_type<u64, Committee>(epoch)
+ }
+ 
+@@ -637,7 +637,7 @@ public(package) fun is_before_previous_committee(self: &CommitteeSet, epoch: u64
+     false
+ }
+ 
+-public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
++public fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
+     if (self.pending_epoch_change.is_some()) {
+         option::some(self.pending_epoch_change.borrow().epoch)
+     } else {
+@@ -645,14 +645,23 @@ public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
+     }
+ }
+ 
+-public(package) fun mpc_public_key(self: &CommitteeSet): &vector<u8> {
++public fun mpc_public_key(self: &CommitteeSet): &vector<u8> {
+     &self.mpc_public_key
+ }
+ 
+-public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
++public fun is_reconfiguring(self: &CommitteeSet): bool {
+     self.pending_epoch_change.is_some()
+ }
+ 
++/// Has the outgoing committee's handoff certificate been recorded for the
++/// pending reconfiguration? False when not reconfiguring.
++/// `pending_epoch_change()` exposes only the pending epoch, so this is the
++/// only view of `PendingEpochChange.committee_handoff_cert`.
++public fun pending_handoff_cert_is_set(self: &CommitteeSet): bool {
++    self.pending_epoch_change.is_some()
++        && self.pending_epoch_change.borrow().committee_handoff_cert.is_some()
++}
++
+ // ~~~~~~~ Private Functions ~~~~~~~
+ 
+ fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {

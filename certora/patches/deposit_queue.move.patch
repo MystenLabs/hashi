@@ -1,0 +1,84 @@
+diff --git a/packages/hashi/sources/btc/deposit_queue.move b/packages/hashi/sources/btc/deposit_queue.move
+index a5b33a52..8526bbd3 100644
+--- a/packages/hashi/sources/btc/deposit_queue.move
++++ b/packages/hashi/sources/btc/deposit_queue.move
+@@ -153,12 +153,32 @@ public(package) fun delete_expired(
+ // === Accessors ===
+ 
+ /// Check if an active deposit request exists.
+-public(package) fun contains(self: &DepositRequestQueue, id: address): bool {
++public fun contains(self: &DepositRequestQueue, id: address): bool {
+     self.requests.contains(id)
+ }
+ 
++/// Check if a deposit request has been confirmed (moved to the processed
++/// bag by `insert_processed`).
++public fun contains_processed(self: &DepositRequestQueue, id: address): bool {
++    self.processed.contains(id)
++}
++
++/// Borrow the active-requests `ObjectBag` itself (not an entry in it) —
++/// lets spec code compare its identity (`sui::object::id`) against
++/// `processed_ref`'s, since they're two distinct objects in any reachable
++/// state (each gets its own fresh UID from `deposit_queue::create`), a
++/// fact a fully-nondet `DepositRequestQueue` doesn't otherwise encode.
++public fun requests_ref(self: &DepositRequestQueue): &ObjectBag {
++    &self.requests
++}
++
++/// Borrow the processed-requests `ObjectBag` itself. See `requests_ref`.
++public fun processed_ref(self: &DepositRequestQueue): &ObjectBag {
++    &self.processed
++}
++
+ /// Borrow an active deposit request.
+-public(package) fun borrow_request(
++public fun borrow_request(
+     self: &DepositRequestQueue,
+     request_id: address,
+ ): &DepositRequest {
+@@ -166,31 +186,39 @@ public(package) fun borrow_request(
+ }
+ 
+ /// Copy the UTXO out of a deposit request (Utxo has copy).
+-public(package) fun utxo(request: &DepositRequest): Utxo {
++public fun utxo(request: &DepositRequest): Utxo {
+     request.utxo
+ }
+ 
+ /// The committee certificate recorded at approval time, if any. Returns
+ /// `None` for requests that have not yet been through `approve_deposit`.
+-public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
++public fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
+     request.approval_cert
+ }
+ 
+ /// The clock timestamp at which the request was approved, if any.
+ /// Returns `None` for requests that have not yet been through
+ /// `approve_deposit`.
+-public(package) fun approved_timestamp_ms(request: &DepositRequest): Option<u64> {
++public fun approved_timestamp_ms(request: &DepositRequest): Option<u64> {
+     request.approved_timestamp_ms
+ }
+ 
+ /// The clock timestamp at which the request was confirmed, if any.
+ /// Returns `None` for requests that have not yet been through
+ /// `confirm_deposit`.
+-public(package) fun confirmed_timestamp_ms(request: &DepositRequest): Option<u64> {
++public fun confirmed_timestamp_ms(request: &DepositRequest): Option<u64> {
+     request.confirmed_timestamp_ms
+ }
+ 
+-public(package) fun request_id(self: &DepositRequest): ID {
++/// Borrow a processed (confirmed or expired) deposit request.
++public fun borrow_processed(
++    self: &DepositRequestQueue,
++    request_id: address,
++): &DepositRequest {
++    self.processed.borrow(request_id)
++}
++
++public fun request_id(self: &DepositRequest): ID {
+     self.id.to_inner()
+ }
+ 

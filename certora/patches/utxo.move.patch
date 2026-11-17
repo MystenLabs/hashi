@@ -1,0 +1,23 @@
+diff --git a/packages/hashi/sources/btc/utxo.move b/packages/hashi/sources/btc/utxo.move
+index 5b34a16d..a028a77b 100644
+--- a/packages/hashi/sources/btc/utxo.move
++++ b/packages/hashi/sources/btc/utxo.move
+@@ -38,15 +38,15 @@ public fun utxo(utxo_id: UtxoId, amount: u64, derivation_path: Option<address>):
+ 
+ // ~~~~~~~ Package Functions ~~~~~~~
+ 
+-public(package) fun id(self: &Utxo): UtxoId {
++public fun id(self: &Utxo): UtxoId {
+     self.id
+ }
+ 
+-public(package) fun amount(self: &Utxo): u64 {
++public fun amount(self: &Utxo): u64 {
+     self.amount
+ }
+ 
+-public(package) fun derivation_path(self: &Utxo): Option<address> {
++public fun derivation_path(self: &Utxo): Option<address> {
+     self.derivation_path
+ }
+ 

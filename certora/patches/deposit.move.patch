@@ -1,0 +1,31 @@
+diff --git a/packages/hashi/sources/btc/deposit.move b/packages/hashi/sources/btc/deposit.move
+index 2dc2dcd1..5c384e82 100644
+--- a/packages/hashi/sources/btc/deposit.move
++++ b/packages/hashi/sources/btc/deposit.move
+@@ -82,7 +82,7 @@ public struct ExpiredDepositDeleted has copy, drop {
+ 
+ // ~~~~~~~ Entry Functions ~~~~~~~
+ 
+-entry fun deposit(
++public entry fun deposit(
+     hashi: &mut Hashi,
+     utxo: hashi::utxo::Utxo,
+     clock: &sui::clock::Clock,
+@@ -129,7 +129,7 @@ entry fun deposit(
+ /// `confirm_deposit` is rejected, leaving the approval parked. If the
+ /// committee rotates during the window, the deposit will also need to be
+ /// re-approved by the new epoch's committee.
+-entry fun approve_deposit(
++public entry fun approve_deposit(
+     hashi: &mut Hashi,
+     request_id: address,
+     cert: CommitteeSignature,
+@@ -194,7 +194,7 @@ entry fun approve_deposit(
+ ///
+ /// A request whose UTXO is already in the pool, active or spent, aborts up
+ /// front, before any state change and before anything is minted.
+-entry fun confirm_deposit(
++public entry fun confirm_deposit(
+     hashi: &mut Hashi,
+     request_id: address,
+     clock: &sui::clock::Clock,
