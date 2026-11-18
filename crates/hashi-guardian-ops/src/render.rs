@@ -858,9 +858,9 @@ pub mod tests {
         assert_eq!(
             error(Slot::B),
             format!(
-                "{} changes the guardian's protos or log records from slot a's build, {}: crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto; a rotation cannot move the key across that without a compatibility review",
-                world::NEXT,
-                world::COMMIT
+                "{next} changes the guardian's protos or log records from slot a's build, {commit}: crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto; a rotation cannot move the key across that without a compatibility review. Once a review finds both builds still read each other's messages and records, add {commit}..{next} to GUARDIAN_FORMATS_REVIEWED",
+                next = world::NEXT,
+                commit = world::COMMIT
             )
         );
         state.borrow_mut().format_changes.clear();
