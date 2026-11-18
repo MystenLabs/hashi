@@ -175,6 +175,24 @@ pub fn check_avss_message(bytes: &[u8], shape: AvssShape) -> CountCheckResult<()
     cursor.finish()
 }
 
+pub fn check_exact_avss_message(
+    bytes: &[u8],
+    threshold: u16,
+    weights: PartyWeights<'_>,
+) -> CountCheckResult<()> {
+    let shape = AvssShape {
+        threshold,
+        num_nodes: weights.num_nodes() as u16,
+    };
+    avss_ciphertexts(bytes, shape)?
+        .lengths
+        .iter()
+        .zip(weights.0)
+        .try_for_each(|(&len, &weight)| {
+            expect_bytes("ciphertext.encs", len, avss_complaint_response_size(weight))
+        })
+}
+
 pub fn check_rotation_messages(
     bytes: &[u8],
     shape: AvssShape,

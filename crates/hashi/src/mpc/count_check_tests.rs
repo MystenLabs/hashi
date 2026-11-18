@@ -376,7 +376,12 @@ fn dealer_messages_of_random_shapes_pass(
 fn every_ciphertext_has_its_recipients_complaint_response_length() {
     let weights = [0, 1, 127, 128, 300];
     let (message, shape) = dealer_message(&weights, 2, 1);
-    let ciphertexts = avss_ciphertexts(&bcs::to_bytes(&message).unwrap(), shape).unwrap();
+    let bytes = bcs::to_bytes(&message).unwrap();
+    assert_eq!(
+        check_exact_avss_message(&bytes, shape.threshold, PartyWeights(&weights)),
+        Ok(())
+    );
+    let ciphertexts = avss_ciphertexts(&bytes, shape).unwrap();
     for (party, &weight) in weights.iter().enumerate() {
         assert_eq!(
             ciphertexts.length(party as PartyId),
