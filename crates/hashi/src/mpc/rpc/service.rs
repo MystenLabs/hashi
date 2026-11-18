@@ -70,6 +70,7 @@ impl MpcService for HttpService {
                         &sender,
                         "send_messages",
                         send_messages_protocol(&external_request),
+                        "count",
                     );
                 }
                 send_messages_error(sender, e)
@@ -77,7 +78,15 @@ impl MpcService for HttpService {
             check_avid_batch_ceiling(&service, &shape, &external_request)
                 .map_err(|e| send_messages_error(sender, e))?;
             let internal_request = types::SendMessagesRequest::try_from(&external_request)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                .map_err(|e| {
+                    undecodable_request(
+                        &service,
+                        sender,
+                        "send_messages",
+                        send_messages_protocol(&external_request),
+                        e,
+                    )
+                })?;
             drop(external_request);
             let prepared = PreparedMessages::new(internal_request.messages);
             let label = match &prepared {
@@ -248,7 +257,7 @@ impl MpcService for HttpService {
             gates::check_complain(&shape, committee, caller, epoch, &external_request)
                 .map_err(|e| complaint_error(&service, caller, protocol, e))?;
             let internal_request = types::ComplainRequest::try_from(&external_request)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                .map_err(|e| undecodable_request(&service, caller, "complain", protocol, e))?;
             drop(external_request);
             let outcome = {
                 let mut mgr = lock_run.write(&mpc_manager);
@@ -476,12 +485,27 @@ fn complaint_error(service: &HttpService, caller: Address, protocol: &str, e: Mp
         MpcError::CountCheckRefused { .. } => {
             metrics
                 .refusal_counters()
-                .request(&caller, "complain", protocol);
+                .request(&caller, "complain", protocol, "count");
             tracing::warn!("complain failed: {e}");
         }
         _ => tracing::warn!("complain failed: {e}"),
     }
     mpc_error_to_status(e)
+}
+
+fn undecodable_request(
+    service: &HttpService,
+    caller: Address,
+    handler: &str,
+    protocol: &str,
+    e: impl std::fmt::Display,
+) -> Status {
+    service
+        .metrics()
+        .refusal_counters()
+        .request(&caller, handler, protocol, "decode");
+    tracing::warn!("{handler} from {caller:?} failed to decode: {e}");
+    Status::invalid_argument(e.to_string())
 }
 
 fn refuse_complaint(service: &HttpService, caller: Address, refusal: ComplaintRefusal) -> Status {

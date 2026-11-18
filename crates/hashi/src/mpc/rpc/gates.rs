@@ -53,7 +53,7 @@ pub(super) fn check_send_messages(
         Some(Messages::AvidNonceMessage(avid)) => {
             check_avid_nonce_message(shape, sender, holder, avid)
         }
-        None => Ok(()),
+        None => member_party(current, sender, "Sender").map(drop),
     }
 }
 

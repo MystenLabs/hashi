@@ -20438,7 +20438,7 @@ fn send_messages_count_checks_before_the_manager_lock() {
             .mpc_peer_refusals_total
             .with_label_values(&[&sender, "request"])
             .get(),
-        1
+        2
     );
     assert!(
         metrics
@@ -20448,15 +20448,38 @@ fn send_messages_count_checks_before_the_manager_lock() {
             > 0
     );
     assert_eq!(
-        metrics
+        ["count", "decode"].map(|reason| metrics
             .mpc_refusals_total
-            .with_label_values(&["request", "send_messages", "dkg", "count"])
-            .get(),
-        1
+            .with_label_values(&["request", "send_messages", "dkg", reason])
+            .get()),
+        [1, 1]
     );
 
     let accepted = rt.block_on(send(honest)).unwrap();
     assert!(accepted.is_ok(), "{accepted:?}");
+
+    let callers = [setup.address(1), Address::new([0xee; 32])];
+    let refused = callers.map(|caller| {
+        let mut empty = tonic::Request::new(proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: None,
+        });
+        empty.extensions_mut().insert(caller);
+        rt.block_on(async {
+            use proto::mpc_service_server::MpcService;
+            service.send_messages(empty).await
+        })
+        .unwrap_err()
+        .code()
+    });
+    assert_eq!(refused, [tonic::Code::InvalidArgument; 2]);
+    assert_eq!(
+        callers.map(|caller| metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&caller.to_string(), "request"])
+            .get()),
+        [3, 0]
+    );
 }
 
 #[test]

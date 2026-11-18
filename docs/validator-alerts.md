@@ -84,7 +84,8 @@ Dashboard-worthy but **not** alerts:
   abandoned.
 - `hashi_mpc_refusals_total` — the MPC refusals behind the refusal alerts, by
   `side`, `handler`, `protocol` and `reason`. A complaint that names no
-  protocol counts as `unspecified`.
+  protocol counts as `unspecified`, and so does a `SendMessages` request with
+  no message kind your node's build knows.
 - `hashi_peer_bridge_work_seconds_total` — seconds your node spent validating
   and signing each peer's withdrawal signing and construction requests, at most
   two at a time per peer. A rate near 2 over an hour means the peer keeps both
