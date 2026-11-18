@@ -20438,7 +20438,7 @@ fn send_messages_count_checks_before_the_manager_lock() {
             .mpc_peer_refusals_total
             .with_label_values(&[&sender, "request"])
             .get(),
-        1
+        2
     );
     assert!(
         metrics
@@ -20448,15 +20448,101 @@ fn send_messages_count_checks_before_the_manager_lock() {
             > 0
     );
     assert_eq!(
-        metrics
+        ["count", "decode"].map(|reason| metrics
             .mpc_refusals_total
-            .with_label_values(&["request", "send_messages", "dkg", "count"])
-            .get(),
-        1
+            .with_label_values(&["request", "send_messages", "dkg", reason])
+            .get()),
+        [1, 1]
     );
 
     let accepted = rt.block_on(send(honest)).unwrap();
     assert!(accepted.is_ok(), "{accepted:?}");
+
+    let callers = [setup.address(1), Address::new([0xee; 32])];
+    let refused = callers.map(|caller| {
+        let mut empty = tonic::Request::new(proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: None,
+        });
+        empty.extensions_mut().insert(caller);
+        rt.block_on(async {
+            use proto::mpc_service_server::MpcService;
+            service.send_messages(empty).await
+        })
+        .unwrap_err()
+        .code()
+    });
+    assert_eq!(refused, [tonic::Code::InvalidArgument; 2]);
+    assert_eq!(
+        callers.map(|caller| metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&caller.to_string(), "request"])
+            .get()),
+        [3, 0]
+    );
+}
+
+#[test]
+fn send_messages_with_no_payload_counts_a_departing_rotation_dealer_and_not_an_outsider() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut rotation_setup = RotationTestSetup::new();
+    let (receiver, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let store = Arc::clone(&receiver.public_messages_store);
+    let departing_idx = 4;
+    let epoch = rotation_setup.shrink_to_next_epoch(departing_idx);
+    let manager = rotation_setup.rotation_manager_at_target(0, dkg_output, store);
+    let callers = [
+        rotation_setup.setup.address(departing_idx),
+        Address::new([0xee; 32]),
+    ];
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let metrics = hashi.metrics.clone();
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let refused = callers.map(|caller| {
+        let mut empty = tonic::Request::new(proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: None,
+        });
+        empty.extensions_mut().insert(caller);
+        rt.block_on(async {
+            use proto::mpc_service_server::MpcService;
+            service.send_messages(empty).await
+        })
+        .unwrap_err()
+        .code()
+    });
+    assert_eq!(refused, [tonic::Code::InvalidArgument; 2]);
+    assert_eq!(
+        callers.map(|caller| metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&caller.to_string(), "request"])
+            .get()),
+        [1, 0]
+    );
+    assert_eq!(
+        metrics
+            .mpc_refusals_total
+            .with_label_values(&["request", "send_messages", "unspecified", "decode"])
+            .get(),
+        1
+    );
 }
 
 #[test]

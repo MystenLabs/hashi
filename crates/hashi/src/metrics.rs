@@ -846,7 +846,7 @@ impl Metrics {
             .unwrap(),
             mpc_peer_refusals_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_peer_refusals_total",
-                "MPC requests refused by a handler's count check (side request, each retry counted), and the peer's responses refused by this node's response checks or decode limits (side response, once per call)",
+                "SendMessages and Complain requests refused by the count check or failing to decode after it (side request, each retry counted), and the peer's responses refused by this node's response checks or decode limits (side response, once per call)",
                 &["peer", "side"],
                 registry,
             )
@@ -2345,8 +2345,14 @@ pub(crate) struct RefusalCounters {
 }
 
 impl RefusalCounters {
-    pub(crate) fn request(&self, peer: &sui_sdk_types::Address, handler: &str, protocol: &str) {
-        self.record(peer, MPC_REFUSAL_REQUEST, handler, protocol, "count");
+    pub(crate) fn request(
+        &self,
+        peer: &sui_sdk_types::Address,
+        handler: &str,
+        protocol: &str,
+        reason: &str,
+    ) {
+        self.record(peer, MPC_REFUSAL_REQUEST, handler, protocol, reason);
     }
 
     pub(crate) fn response(

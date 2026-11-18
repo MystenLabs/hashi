@@ -53,7 +53,14 @@ pub(super) fn check_send_messages(
         Some(Messages::AvidNonceMessage(avid)) => {
             check_avid_nonce_message(shape, sender, holder, avid)
         }
-        None => Ok(()),
+        None => member_party(current, sender, "Sender")
+            .map(drop)
+            .or_else(|not_member| {
+                reject_kind_mismatch(shape, sender, ProtocolType::KeyRotation)
+                    .and_then(|()| rotation_shares_of(shape, sender))
+                    .map(drop)
+                    .map_err(|_| not_member)
+            }),
     }
 }
 
