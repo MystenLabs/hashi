@@ -61,7 +61,9 @@ holds the signing key, and the key moves to each new committee as the Sui
 validator set changes.
 
 A second, independent signer called the Guardian co-signs every withdrawal
-from inside a cloud enclave. Every deposit address requires both the committee
+from inside a cloud enclave. A cloud enclave is a cloud-hosted trusted
+execution environment that isolates the code running inside it from the rest
+of the machine. Every deposit address requires both the committee
 and the Guardian to spend it, so a compromised committee cannot move funds on
 its own. See [Guardian](guardian.mdx) and
 [Bitcoin Address Scheme](address-scheme.mdx) for the details.
@@ -81,6 +83,16 @@ Hashi supports 2 flows, deposit and withdraw:
 Deposits are free and withdrawals pay only the Bitcoin miner fee. There is no
 protocol fee. See [User Flows](user-flows.mdx) for the end-to-end picture and
 [Fees](fees.mdx) for the numbers.
+
+The `hashi` CLI has a command for each flow, plus one to check a balance:
+
+- **`hashi deposit`:** Generates the Taproot deposit address for a Sui
+  address, then submits and tracks deposit requests on Sui for the BTC you
+  sent to it. You send the BTC itself from your own Bitcoin wallet.
+- **`hashi withdraw`:** Submits, cancels, and tracks withdrawal requests on
+  Sui.
+- **`hashi balance`:** Reports the `hBTC` balance of a Sui address in
+  satoshis and BTC.
 
 ## What is hBTC?
 

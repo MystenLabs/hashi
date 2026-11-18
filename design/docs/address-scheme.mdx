@@ -43,6 +43,8 @@ answer: >-
 
 Every Sui address has its own unique Hashi Bitcoin deposit address. This gives
 Hashi a lightweight way to identify which Sui address to credit for a deposit.
+For the derivation steps, see
+[How is a deposit address derived from a Sui address?](#how-is-a-deposit-address-derived-from-a-sui-address).
 All Hashi deposit addresses are `P2TR` (Pay-to-Taproot) with a Taproot tree of
 two leaves:
 
@@ -92,7 +94,8 @@ the value:
 
 1. Express 60 days in seconds: `60 * 24 * 60 * 60` = `5_184_000`.
 2. Convert to 512-second units, rounding up:
-   `ceil(5_184_000 / 512)` = `10_125`. This is a count of 512-second units in
+   `ceil(5_184_000 / 512)` = `10_125`. The division is exact, so rounding up
+   changes nothing here. This is a count of 512-second units in
    60 days, not a count of blocks.
 3. OR in the time-based type bit, `1 << 22` (`4_194_304`):
    `4_194_304 | 10_125` = `4_204_429` = `0x0040278D`.

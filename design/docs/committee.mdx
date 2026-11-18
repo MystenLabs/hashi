@@ -121,3 +121,31 @@ participate in the hand-off protocol. This design makes that assumption,
 because of the challenges of enforcing tight coupling, and a later version
 can add an economic mechanism to motivate older committee members to
 participate in the hand-off process.
+
+## Genesis committee formation
+
+At genesis, the first committee forms through the reconfiguration flow
+`start_reconfig`, then DKG, then `end_reconfig`. `start_reconfig` aborts at
+genesis until the publisher sends `hashi::finish_publish` (the `hashi launch`
+command). The genesis committee includes every validator in Sui's active
+validator set that has registered with Hashi, has set its next-epoch BLS and
+encryption keys, and is neither resigned nor ignored by governance when
+`start_reconfig` lands. A validator that wants to join the first committee
+must complete registration before that point. Unlike later reconfigurations,
+the initial reconfiguration does not need a hand-off certificate, because no
+current committee exists to sign one. When `end_reconfig` completes, the
+initial committee and the MPC public key that DKG produced appear onchain.
+
+## Rotating a committee member's BLS key
+
+To rotate your BLS12-381 key, call `update_next_epoch_public_key` in the
+`hashi::validator` module from your validator address or its operator
+address. The update requires a proof-of-possession signature, which the
+contract verifies over a message built from an intent tag, the Hashi object
+ID, the current Sui epoch, your validator address, and the new key. The
+contract does not gate key updates on pause or reconfiguration, so you can
+rotate keys during a pause. Every update emits a
+`ValidatorUpdated` event for offchain watchers. To confirm the rotation is
+queued, read `next_epoch_public_key` from your `MemberInfo` record. The key
+active in the current epoch remains in the `Committee` struct until the next
+committee forms.
