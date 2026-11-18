@@ -33,6 +33,8 @@ answer: >-
   At every Sui epoch change the Hashi committee reconfigures: a node submits start_reconfig, processing pauses, key rotation runs, and end_reconfig resumes operations. Keep your node online and its registration current. A reconfiguration that overruns its Sui epoch is aborted and restarted by the nodes, or by hand with hashi committee abort-reconfig.
 ---
 
+At every Sui epoch change, the Hashi committee reconfigures. Keep your node online and its registration current. If a reconfiguration overruns its Sui epoch, the nodes abort it and start a fresh one. If no node is running to do this, you can abort it by hand with `hashi committee abort-reconfig` once its Sui epoch has ended.
+
 ## What happens automatically
 
 On every Sui epoch change, the Hashi committee reconfigures:
@@ -78,7 +80,7 @@ To stay on the previous committee instead, for example while you fix the cause o
 hashi proposal create update-config reconfig_hold bool:true
 ```
 
-Once the proposal executes, `start_reconfig` aborts on chain, nodes stop submitting it (`hashi_reconfig_hold` reads `1`), and the previous committee keeps serving deposits and withdrawals. The overrun reconfiguration is still aborted as usual, and a reconfiguration already pending still completes.
+Once the proposal executes, `start_reconfig` aborts onchain, nodes stop submitting it (`hashi_reconfig_hold` reads `1`), and the previous committee keeps serving deposits and withdrawals. The overrun reconfiguration is still aborted as usual, and a reconfiguration already pending still completes. Before you rely on the hold, confirm that `hashi_reconfig_hold` reads `1`.
 
 Clear the flag with another `update-config` proposal (`bool:false`). Clearing it does not itself start anything: nodes submit `start_reconfig` when they see a Sui epoch change, an abort, or on startup, and nothing watches the config for this. So after clearing, the replacement waits for the next Sui epoch change unless an operator starts it by hand:
 

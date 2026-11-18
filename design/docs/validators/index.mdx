@@ -34,15 +34,15 @@ answer: >-
 ---
 ---
 
-These pages are for Sui validators joining the Hashi committee. They cover prerequisites, configuration, genesis, ongoing operations, and governance.
+To join the Hashi committee as an active Sui validator, you provision a Bitcoin archival node and a Sui fullnode, generate TLS, operator, and backup keys, write the validator config, register onchain with your validator account key, start the `hashi` service, and monitor it. The guides in this section cover each step, plus genesis, ongoing operations, and governance.
 
-Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. [Committee](../committee.mdx) members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key. The work your node performs is the [deposit](../deposit.mdx) and [withdrawal](../withdraw.mdx) flows, plus [reconfiguration](../reconfiguration.mdx) at every epoch boundary.
+Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. [Committee](../committee.mdx) members run the `hashi` service alongside their Sui validator to participate in multi-party computation (MPC) threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key. The work your node performs is the [deposit](../deposit.mdx) and [withdrawal](../withdraw.mdx) flows, plus [reconfiguration](../reconfiguration.mdx) at every epoch boundary.
 
 The pages cover both Hashi deployments, Testnet and Mainnet. The [Networks](../reference/networks.mdx) table gives each network's status and parameters. Network-specific examples come in **Mainnet** and **Testnet** tabs: pick your network in any one of them and the rest of the section follows. Everywhere else, use the column for your **target network**.
 
 ## Joining the committee
 
-Onboarding takes 6 steps. The pages in this section cover the detail, the defaults, and the failure modes:
+Onboarding takes 6 steps:
 
 1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run the Sui fullnode yourself; running the Bitcoin node yourself is strongly encouraged. For a Mainnet Bitcoin node, provision 2TB of SSD storage. See [External service dependencies](prerequisites.mdx#external-service-dependencies), [Sui RPC](prerequisites.mdx#sui-rpc), and [Bitcoin node](prerequisites.mdx#bitcoin-node).
 2. **Generate keys:** a dedicated TLS key, a fresh operator key funded with at least 2 SUI, and an OpenPGP backup key. See [TLS key (dedicated)](keys.mdx#tls-key-dedicated), [Operator key (day-to-day signing)](keys.mdx#operator-key-day-to-day-signing), and [Backup key (OpenPGP)](keys.mdx#backup-key-openpgp).
@@ -59,8 +59,6 @@ These details trip up most operators:
 - Fund the operator address with at least 2 SUI. With exactly 1 SUI, the node's gas bootstrap fails with `InsufficientCoinBalance` and retries every 10 minutes until you add SUI. See [Operator key (day-to-day signing)](keys.mdx#operator-key-day-to-day-signing).
 
 ## Common questions
-
-These answers summarize details from the pages in this section.
 
 ### Does the Hashi node connect to your Sui validator?
 
@@ -90,7 +88,9 @@ A Mainnet node depends on:
 
 See [External service dependencies](prerequisites.mdx#external-service-dependencies), [Sui RPC](prerequisites.mdx#sui-rpc), [Bitcoin node](prerequisites.mdx#bitcoin-node), and [Keys and Security](keys.mdx).
 
-## Pages in this section
+## Validator guides {#pages-in-this-section}
+
+Each card links to one validator guide.
 
 import DocCardList from '@theme/DocCardList';
 

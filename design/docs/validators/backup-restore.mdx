@@ -35,7 +35,7 @@ answer: >-
   A Hashi node writes an OpenPGP-encrypted backup every epoch holding the validator config, key files, a database snapshot, a manifest, and MPC recovery data. To restore after machine loss, stop the node, extract the archive with hashi backup restore, move the database into place, fix permissions, and start the node. Never restore keys from a possibly compromised node.
 ---
 
-Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node Backups](../node-backup.mdx) guide. This section covers what the node backs up and how to restore a node from a backup.
+A Hashi node writes an encrypted backup every epoch, and you can restore a node from one. Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node Backups](../node-backup.mdx) guide.
 
 ## What a backup holds
 
@@ -99,7 +99,7 @@ or disk loss without suspected compromise**, not to compromise recovery.
 
 **Which backup to use.** Use the newest trusted backup. For remote archives, use independently retained receipts and audit history to select an exact S3 version ID or GCS generation, then pin it with `--version-id` or `--generation`; neither the newest object nor successful decryption proves its origin. To take part in the current epoch, the restored database must hold the encryption and signing keys recorded for your node in the current committee, and the backup the node wrote at the most recent epoch change does. An older backup, or an empty database, still gives you a working node: it registers replacement keys by itself and rejoins at the next reconfiguration, without taking part in MPC until then. There is no fixed age limit: what matters is whether the backup holds those keys, and if it does not, the cost is that wait.
 
-**What to restore.** The database is the part you cannot recreate, so always restore it. Restore the config and key files too when the copies on the host are gone, such as on a new host or after a lost disk. If they are intact, keep them: the copies in the archive date from when the node wrote the backup.
+**What to restore.** The database is the part you cannot recreate, so always restore it. Restore the config and key files too when the copies on the host are gone, such as on a new host or after a lost disk. If they are intact, keep them: the copies in the archive date from when the node wrote the backup. When `backup-pgp-cert` is a file path, the archive does not hold that public certificate, so confirm that you have the file before you start. Without it, the restored config fails to load (step 5).
 
 1. **Stop the node, and keep every other copy of it stopped.** If you are moving to a new host, make sure the node on the old host cannot start again. Two running copies would both act as the same committee member.
 
@@ -114,12 +114,12 @@ or disk loss without suspected compromise**, not to compromise recovery.
    sudo install -d -m 700 -o "$USER" /var/lib/hashi/restore
 
    # With a local OpenPGP secret key
-   hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
+   hashi backup restore /var/lib/hashi/backups/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc \
      --backup-pgp-secret-key /path/to/secret-key.asc \
      --output-dir /var/lib/hashi/restore
 
    # Or via gpg-agent / YubiKey (works over a forwarded agent)
-   hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
+   hashi backup restore /var/lib/hashi/backups/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc \
      --use-gpg-agent [--gpg-homedir /path/to/gnupghome] \
      --output-dir /var/lib/hashi/restore
    ```
@@ -131,7 +131,7 @@ or disk loss without suspected compromise**, not to compromise recovery.
    The command creates one directory named after the archive and refuses to run if it already exists:
 
    ```text
-   /var/lib/hashi/restore/hashi-backup-<timestamp>/
+   /var/lib/hashi/restore/hashi-backup-epoch-<epoch>-<timestamp>/
      validator.toml               # the config file, under its own name
      <tls-key-file>               # only if tls-private-key was a file path
      <operator-key-file>          # only if operator-private-key was a file path
@@ -143,12 +143,12 @@ or disk loss without suspected compromise**, not to compromise recovery.
 3. **Put the database in place.** Move `hashi-db-snapshot` to the `db` path in your config. If a database is already there, move it aside first; do not merge the two.
 
    ```bash
-   cd /var/lib/hashi/restore/hashi-backup-<timestamp>
+   cd /var/lib/hashi/restore/hashi-backup-epoch-<epoch>-<timestamp>
    sudo mv /var/lib/hashi/db /var/lib/hashi/db.old   # only if a database is already there
    sudo mv hashi-db-snapshot /var/lib/hashi/db
    ```
 
-4. **Put the config and key files back, if you are restoring them.** Inspect the recovered manifest and config, then install files at the paths your deployment uses. The manifest lists the path each one came from; it is a record, not something the command acts on. Never blindly follow archived absolute paths. If the layout changed, edit `tls-private-key`, `operator-private-key`, `db`, and `backup-dir` in the config to match the new paths, and update endpoints for the new host. In the commands below and in step 6, replace `<tls-key-file>` and `<operator-key-file>` with the key file names you find in the extracted directory (the manifest records the path each came from).
+4. **Put the config and key files back, if you are restoring them.** Inspect the recovered manifest and config, then install files at the paths your deployment uses. The manifest lists the path each one came from; it is a record, not something the command acts on. Never blindly follow archived absolute paths. If the layout changed, edit `tls-private-key`, `operator-private-key`, `db`, and `backup-dir` in the config to match the new paths, and update endpoints for the new host. In the commands for this step and step 6, replace `<tls-key-file>` and `<operator-key-file>` with the key file names in the extracted directory. To find those names, run `cat hashi-backup-manifest.toml` first: the manifest records the path each file came from.
 
    ```bash
    cat hashi-backup-manifest.toml
@@ -179,5 +179,5 @@ or disk loss without suspected compromise**, not to compromise recovery.
 8. **Delete the extracted copy.** The directory from step 2 holds decrypted keys and nothing cleans it up for you. Do the same with `db.old` once the node is healthy.
 
    ```bash
-   sudo rm -rf /var/lib/hashi/restore/hashi-backup-<timestamp>
+   sudo rm -rf /var/lib/hashi/restore/hashi-backup-epoch-<epoch>-<timestamp>
    ```

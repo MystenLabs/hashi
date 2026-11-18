@@ -33,6 +33,8 @@ answer: >-
   Hashi serves Prometheus metrics at 127.0.0.1:9180/metrics and pushes them to the Mysten collection endpoint when [metrics-push] is set, which every operator must configure. Alert on hashi_reconfig_in_progress stuck at 1, hashi_presig_pool_remaining at 0, hashi_kyoto_synced at 0, and a low hashi_sui_balance.
 ---
 
+A Hashi node serves Prometheus metrics at `http://127.0.0.1:9180/metrics` and pushes them to the Mysten collection endpoint when you set `[metrics-push]` in the [Validator config](configuration.mdx#validator-config). Every operator must configure the push. [Suggested alerts](#suggested-alerts) gives a starting set. Its critical alerts include a node that is down, a reconfiguration in progress for more than 10 minutes, an empty presignature pool, and a signed withdrawal that your bitcoind rejects.
+
 ## Prometheus endpoint
 
 The node serves metrics at `http://127.0.0.1:9180/metrics` (configurable through `metrics-http-address`).
@@ -102,7 +104,7 @@ Notes:
 | `hashi_mpc_sign_failures_total` | counter | MPC signing failures. Investigate if increasing. |
 | `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG or rotation duration. |
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
-| `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance), labeled `address` with the operator address paying gas. `-1` until the first successful sample. |
+| `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance). The metric's `address` label holds the wallet address that pays gas. `-1` until the first successful sample. |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
 | `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`. It reads `-1` until the pool holds a UTXO to probe; that is expected, not a fault. |
@@ -152,7 +154,7 @@ See [Committee](../committee.mdx) for what membership means and how Hashi derive
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` for > 5 min | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. Each light-client restart briefly resets it to 0. |
 | `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
-| `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
+| `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the wallet whose address appears in the alert's `address` label. (`-1` means not yet sampled, not empty.) |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` increasing | Critical | Your bitcoind rejected a signed withdrawal. Tell the operator channel; if only you see it, check your bitcoind. |
 | `hashi_withdrawal_bitcoin_check_blind == 1` for > 10 min | Warning | Your node cannot check withdrawals. Allow `testmempoolaccept`; see the error log. |
 | A per-peer shed counter from [Key metrics](#key-metrics), or a `busy` or `shape` withdrawal signing or construction refusal, counted in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | For a shed counter, the `peer` might be misbehaving, or your node might be slow or have its limits set too low: rule your node out first (`hashi_request_latency`). A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). Then look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
