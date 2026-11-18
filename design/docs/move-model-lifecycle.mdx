@@ -41,9 +41,8 @@ answer: >-
   during a pause.
 ---
 
-This document illustrates the lifecycle of key Move models in the deposit and
-withdrawal flows, showing how data structures transform between onchain (Sui)
-and offchain (Bitcoin) states.
+Key Move models in the deposit and withdrawal flows change state as data
+structures move between onchain (Sui) and offchain (Bitcoin) states.
 
 ## What is the entry-function gating principle?
 
@@ -78,6 +77,11 @@ wait for the new committee.
 During a reconfiguration, users can still call `deposit()`, but approval and
 confirmation wait for the new committee; see
 [What is the entry-function gating principle?](#what-is-the-entry-function-gating-principle).
+
+The deposit and withdrawal lifecycle diagrams use 2 arrow styles:
+
+- **Solid arrow:** A function call, a state transition, or data that moves into a model.
+- **Dotted arrow:** An offchain observation or read, where a node watches or reads state and acts on what it sees.
 
 ```mermaid
 ---
@@ -173,6 +177,7 @@ flowchart TD
             BAL["Balance&lt;BTC&gt;<br/>(User's tokens)"]
             WR["WithdrawalRequest<br/>{ id, btc_amount, bitcoin_address }"]
             WRQ["WithdrawalRequestQueue<br/>.requests"]
+            WR_APPROVED["WithdrawalRequest (approved)<br/>approval_cert recorded"]
         end
 
         subgraph ProcessPhase["2. Processing Phase"]
@@ -221,7 +226,8 @@ flowchart TD
     WR -->|"request_withdrawal()"| WRQ
     WRQ -.->|"Observe & approve<br/>request"| MEMBERS2
     MEMBERS2 -->|"Screen BTC destination<br/>& Sui requester"| SCREEN2
-    SCREEN2 --> VOTE
+    SCREEN2 -->|"approve_request()"| WR_APPROVED
+    WR_APPROVED --> VOTE
     VOTE -.->|"Select UTXOs<br/>(off-chain)"| UTXO_POOL
     VOTE --> BURN
     BURN -->|"Balance&lt;BTC&gt; burned,<br/>WithdrawalTransaction created"| PW
@@ -319,3 +325,9 @@ drifted and adopting a new limiter policy after a guardian rotation.
 | `CommitteeMember`        | `Committee.members`                      | Validator with public_key and voting weight                            |
 | `CommitteeSignature`     | Built in the programmable transaction block (PTB) by `committee::new_committee_signature`; stored as `approval_cert` on requests | Aggregated BLS signature with signers bitmap |
 | `CertifiedMessage<T>`    | Verified onchain                         | Message proven to have committee quorum support                        |
+
+## What is the object mirror?
+
+Each committee node keeps an object mirror, a local copy of the Hashi object state. The node opens a Sui RPC transaction subscription (`subscribe_transactions`) whose filter matches every transaction that affects the Hashi object. For each transaction, the node applies the full post-state of every object that transaction wrote, along with the IDs it deleted. The mirror does not depend on events: a Move mutation that emits no event still arrives as an object write. Side effects such as the local limiter advance come from these state transitions and not from events.
+
+If a replay fails, the node rebuilds the mirror from a fresh scrape of the Hashi object. It then asks the reconcile loop to realign the local limiter, because the limiter might have missed fully signed transitions during the gap.
