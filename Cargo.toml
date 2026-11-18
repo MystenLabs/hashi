@@ -112,8 +112,8 @@ google-cloud-gax = { version = "=1.9.1", default-features = false }
 google-cloud-auth = { version = "=1.9.0", default-features = false }
 
 # fastcrypto — pinned to a `main` rev.
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "a58b2984d6ac827b40c48fc0f2478a46569b5b17" }
-fastcrypto-threshold = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "a58b2984d6ac827b40c48fc0f2478a46569b5b17" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f80bdba4d5396018e2fd8304384c46a483975560" }
+fastcrypto-threshold = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f80bdba4d5396018e2fd8304384c46a483975560" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }

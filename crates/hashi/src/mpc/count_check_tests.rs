@@ -819,9 +819,11 @@ fn merkle_paths_are_refused_where_bcs_or_compute_root_refuse_them() {
         let path = [uleb128(nodes), vec![0; nodes]].concat();
         let proof: merkle::MerkleProof =
             merkle::MerkleProof::new(&vec![merkle::Node::Empty; nodes]);
+        // The largest tree whose proofs have `nodes` siblings.
+        let n_leaves = usize::MAX >> (usize::BITS as usize - nodes);
         (
             check_echo(&echo(&path), weights, 0),
-            proof.compute_root(&[], 0).is_some(),
+            proof.compute_root(&[], 0, n_leaves).is_some(),
         )
     };
     assert_eq!(walk_and_compute_root(MAX_MERKLE_PATH), (Ok(()), true));
