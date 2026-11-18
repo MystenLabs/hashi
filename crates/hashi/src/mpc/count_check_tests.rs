@@ -114,8 +114,10 @@ fn crafted_rotation_map(keys: &[u16], message: &[u8]) -> Vec<u8> {
     bytes
 }
 
+const SKEWED_WEIGHTS: [u16; 5] = [5, 3, 1, 0, 1];
+
 static SKEWED_MESSAGE: LazyLock<(Vec<u8>, AvssShape)> = LazyLock::new(|| {
-    let (message, shape) = dealer_message(&[5, 3, 1, 0, 1], 4, 2);
+    let (message, shape) = dealer_message(&SKEWED_WEIGHTS, 4, 2);
     (bcs::to_bytes(&message).unwrap(), shape)
 });
 
@@ -175,6 +177,10 @@ fn trailing_or_missing_bytes_are_refused() {
     longer.push(0);
     assert_eq!(
         check_avss_message(&longer, *shape),
+        Err(CountCheckError::Trailing(1))
+    );
+    assert_eq!(
+        check_exact_avss_message(&longer, shape.threshold, PartyWeights(&SKEWED_WEIGHTS)),
         Err(CountCheckError::Trailing(1))
     );
     assert!(matches!(
