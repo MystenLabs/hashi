@@ -185,7 +185,7 @@ Executing the proposal changes the onchain value, but a running node keeps the g
 
 ## Backup
 
-Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Local restore picks the format from the suffix and also accepts a `.tar` you decrypted yourself; S3 and GCS restore accept only encrypted `.tar.asc` archives.
+Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Local restore picks the format from the suffix and also accepts a `.tar` you decrypted yourself; S3 and GCS restore accept only encrypted `.tar.asc` archives. The 1.0 releases have only `backup save` and `backup restore` of local files: remote backups, remote restore, and `--local-only` come in later releases.
 
 ```bash
 # Create a backup (uses the required configured cert unless overridden inline/by path).
@@ -200,10 +200,10 @@ hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-di
 # Restore a local unencrypted .tar — no key needed
 hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
 
-# Restore an S3 object; optionally pin its version (not in the 1.0 releases):
+# Not in the 1.0 releases: restore an S3 object, optionally pinning its version.
 hashi backup restore 's3://<bucket>/<key>.tar.asc' --region <aws-region> [--version-id <version-id>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 
-# Restore a GCS object; optionally pin its generation (not in the 1.0 releases):
+# Not in the 1.0 releases: restore a GCS object, optionally pinning its generation.
 hashi backup restore 'gs://<bucket>/<key>.tar.asc' [--generation <positive-integer>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 ```
 
@@ -216,7 +216,7 @@ With remote backups configured, a `--backup-pgp-cert` override with different
 usable encryption recipients requires `--local-only` or updating the configured
 certificate. See the [config template](../validators/configuration.mdx#validator-config).
 
-S3 restore requires `--region` and optionally accepts `--version-id` to select
+Remote restore is not in the 1.0 releases. S3 restore requires `--region` and optionally accepts `--version-id` to select
 an exact version; it rejects `--generation`. GCS restore optionally accepts
 `--generation`, a positive signed 64-bit integer, and rejects `--region` and
 `--version-id`. All three remote flags are invalid for local paths. Remote

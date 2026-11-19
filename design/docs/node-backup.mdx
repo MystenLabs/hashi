@@ -53,6 +53,14 @@ to the matching private key, either as a local PGP secret-key file or through
 SSH, you can restore on a remote server using a YubiKey plugged into your laptop
 instead of plugging the YubiKey into the server itself.
 
+> **On the 1.0 releases.** `mainnet-1.0` and `testnet-1.0` write an encrypted backup every epoch and keep it for 14 days, and their `hashi backup` command has only `save` and `restore`. Their archives are named `hashi-backup-<timestamp>.tar.asc` and hold the config, key files, manifest, and database snapshot, but no MPC recovery record. 1.0 does not have:
+>
+> - `-mpc-` archives or the [catastrophic MPC key recovery](#catastrophic-mpc-key-recovery) commands (`export-mpc-recovery-record`, `recover-mpc-key`), so that procedure is not available to a 1.0 fleet.
+> - [Remote backups](#remote-backups): the `[backup-remote]` table, `s3://` and `gs://` restore, and `--local-only`.
+> - `hashi backup test` and `hashi backup assemble-cert` (the `backup-assemble-cert` build feature).
+>
+> On 1.0, keep off-machine copies by copying archives out of `backup-dir` to storage none of your nodes can reach, and test a copy by restoring it with `hashi backup restore` on a machine outside the validator fleet.
+
 ## Prerequisites
 
 The section that uses each item describes it in detail:
@@ -190,6 +198,8 @@ files.
 
 ## Assemble a multi-recipient backup certificate
 
+`hashi backup assemble-cert` is not in the 1.0 releases.
+
 You can combine multiple YubiKey recipients into one OpenPGP certificate.
 **Any selected recipient can independently decrypt the backup**; this is 1-of-n,
 not threshold recovery. Participants exchange only public certificates, so the YubiKeys
@@ -257,7 +267,7 @@ policy, and it does not check X.509 expiry or revocation.
 Before relying on the certificate, make a backup and confirm that each recipient
 can restore that same archive independently.
 
-Run `hashi backup test --backup-pgp-cert hashi-backup-cert.asc --use-gpg-agent`
+`hashi backup test` is not in the 1.0 releases; on 1.0, make a backup and restore it instead. Run `hashi backup test --backup-pgp-cert hashi-backup-cert.asc --use-gpg-agent`
 for a temporary-message round trip with a YubiKey or GnuPG key, or replace
 `--use-gpg-agent` with `--backup-pgp-secret-key private.asc` for a local private key.
 Test files are automatically cleaned up on success or error.
@@ -359,6 +369,8 @@ expiry and remove incident copies when recovery no longer needs them.
 
 ### Monthly off-machine copy
 
+This procedure needs `-mpc-` archives and `hashi backup export-mpc-recovery-record`, which are not in the 1.0 releases. On 1.0, follow the off-machine copy guidance in the **On the 1.0 releases** note at the top of this page instead.
+
 Once a month, copy the backup from the first epoch that starts in that month (UTC)
 to storage that none of your nodes can reach, since anyone who takes over a node
 can delete what its credentials permit. Do not put it in the remote bucket that receives
@@ -392,7 +404,7 @@ For remote restore commands and an on-page recovery checklist, see
 
 ## Remote backups
 
-> **Not in the 1.0 releases.** `mainnet-1.0` and `testnet-1.0` save backups locally only. They have no `[backup-remote]` table, and a 1.0 node refuses to start on a config that sets one. They also cannot restore from an `s3://` or `gs://` URI. On 1.0, copy archives off the machine yourself, as in [Monthly off-machine copy](#monthly-off-machine-copy).
+> **Remote backups are not in the 1.0 releases.** `mainnet-1.0` and `testnet-1.0` save backups locally only and cannot restore from an `s3://` or `gs://` URI. They reject a config that sets `[backup-remote]`. The upload and remote-restore steps in this section, including [Restore and infrastructure limits](#restore-and-infrastructure-limits) and step 1 of [Machine-loss recovery](#machine-loss-recovery), apply only to later releases. The rest of [Machine-loss recovery](#machine-loss-recovery) and [Suspected node compromise](#suspected-node-compromise) apply to 1.0 too.
 
 Configure one remote destination using a `[backup-remote]` table.
 For S3, `region` is required:
@@ -508,6 +520,8 @@ With a remote destination configured, a `--backup-pgp-cert` override with differ
 
 ### Restore and infrastructure limits
 
+Remote restore is not in the 1.0 releases. On 1.0, copy the archive to the host and restore it as a local file.
+
 Restore from a full remote URI without the original node configuration.
 Use independently retained receipts to pin an S3 version or GCS generation:
 
@@ -596,6 +610,8 @@ response, not this single-node procedure. Resharing preserves the global Bitcoin
 key; it does not repair a stolen global private key.
 
 ## Catastrophic MPC key recovery
+
+This procedure is not available on the 1.0 releases: their archives hold no recovery record, and their binary has neither `export-mpc-recovery-record` nor `recover-mpc-key`.
 
 A zero-day compromise could steal and delete MPC key shares across the validator
 fleet. Catastrophic data loss could also leave every node without its shares.
