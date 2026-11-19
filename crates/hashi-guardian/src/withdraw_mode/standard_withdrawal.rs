@@ -357,4 +357,37 @@ mod tests {
             Err(InvalidInputs(message)) if message.contains("too far in the future")
         ));
     }
+
+    #[tokio::test]
+    async fn test_standard_withdrawal_rejects_old_timestamp() {
+        let old_timestamp_secs = now_timestamp_secs() - MAX_REQUEST_AGE_SECS - 60;
+        let (signed_request, committee) =
+            StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+                Network::Regtest,
+                WithdrawalID::new([0xae; 32]),
+                old_timestamp_secs,
+                0,
+            );
+        let amount_sats = signed_request
+            .message()
+            .utxos()
+            .gross_outflow_amount()
+            .to_sat();
+        let (mut enclave, captures) =
+            setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
+        let state_before = enclave.state.limiter_state().expect("activated");
+
+        let result = standard_withdrawal(&mut enclave, wire(signed_request)).await;
+
+        assert!(matches!(
+            result,
+            Err(GuardianError::InvalidInputs(message)) if message.contains("too old")
+        ));
+        // A rejected request does not change the limiter and writes no log.
+        assert_eq!(
+            enclave.state.limiter_state().expect("activated"),
+            state_before
+        );
+        assert!(captures.lock().unwrap().is_empty());
+    }
 }
