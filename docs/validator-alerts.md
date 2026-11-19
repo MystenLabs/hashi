@@ -3,7 +3,7 @@
 Recommended Prometheus alerts for hashi validator operators. A ready-to-use
 rules file lives at [`monitoring/validator-alerts.example.yml`](../monitoring/validator-alerts.example.yml).
 [`monitoring/validator-alerts.test.yml`](../monitoring/validator-alerts.test.yml) has `promtool`
-tests for the peer, pause, MPC work and MPC refusal alerts.
+tests for the peer, pause, MPC work, MPC refusal and nonce batch alerts.
 
 > **On the 1.0 releases.** `mainnet-1.0` and `testnet-1.0` do not export the
 > metrics behind 9 of these rules, so on 1.0 they never fire:
@@ -43,6 +43,7 @@ Two principles shape this list:
 | Crash looping           | `changes(process_start_time_seconds{job="<your-node>"}[1h]) > 3`      | Uses the standard process exporter if you run one; any restart-count source works.                                                                                                                                        |
 | Previous shares missing | `increase(hashi_mpc_rotation_previous_shares_missing_total[1h]) > 0`  | The node owed shares to a rotation and had none, so its weight did not reach the new key.                                                                                                                                 |
 | Complaint withheld      | `increase(hashi_mpc_complaints_withheld_total[1h]) > 0` | A peer's complaint verified, so some dealer sent it a corrupt share, and the dealer is not in `complaint-response-policy`, so the peer cannot recover its share until operators coordinate a fix. Honest nodes never trigger this. Never add a `complaint-response-policy` entry on your own: one wrong entry can leak your shares. |
+| Nonce batch skipped     | `hashi_mpc_nonce_local_skip_batches_total` rose in 1h (see the rules file) | Your node skipped a dealer and threw the nonce batch away, which a healthy node almost never does. This can delay signing. If the alert keeps firing, fix Sui mirror stale first if that is firing too, otherwise tell the operator channel. Clearing does not mean your node recovered. |
 | Withdrawal fails bitcoind | `increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0` | Your bitcoind says a signed withdrawal is invalid. If other operators see it too, withdrawals are broken: raise it in the operator channel. If only you see it, check your bitcoind. |
 | Withdrawal check blind  | `hashi_withdrawal_bitcoin_check_blind == 1` for 10m | An hourly probe found that your bitcoind cannot check withdrawals, so your node signs them unchecked. Usually `testmempoolaccept` is not allowed on your RPC endpoint; see the error log. `-1` means no pool UTXO has been probed yet. |
 | Peer shed               | A per-peer shed counter or a `busy` or `shape` withdrawal signing or construction refusal rose in 1h (see the rules file) | For most shed counters, the peer may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first. A `bitcoind` shed or a `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes none of them unless it runs without a guardian (`busy`). |
@@ -166,6 +167,7 @@ Dashboard-worthy but **not** alerts:
 | `hashi_peer_*`, `hashi_mpc_unguarded_spawn_blocking_total` | node |
 | `hashi_mpc_peer_refusals_*`, `hashi_mpc_refusals_total`, `hashi_mpc_stored_rows_refused_*`, `hashi_mpc_committee_members` | node |
 | `hashi_mpc_complaint_callers_flagged_total`, `hashi_mpc_complaints_refused_total` | node |
+| `hashi_mpc_nonce_local_skip_batches_total` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
 | `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_withdrawal_oldest_unsigned_age_seconds`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |

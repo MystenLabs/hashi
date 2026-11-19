@@ -409,6 +409,77 @@ tests:
               summary: MPC work started outside the per-peer budget
               description: *unguarded
 
+  - name: a-skipped-nonce-batch-warns-for-an-hour
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_nonce_local_skip_batches_total{instance="n1",job="hashi"}'
+        values: '0x59 1x180'
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: discarded a nonce batch it could not build like its peers
+              description: &nonce_skipped >-
+                This node skipped a dealer and threw the nonce batch away.
+                This can delay signing. If the alert keeps firing, fix
+                HashiSuiMirrorStale if that fires too, otherwise tell the operator
+                channel.
+      - eval_time: 125m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts: []
+
+  - name: a-nonce-batch-skipped-before-the-first-scrape-warns-in-the-first-hour
+    interval: 1m
+    input_series:
+      - series: 'uptime{version="v",sui_chain_id="s",bitcoin_chain_id="b",package_id="p",hashi_object_id="h",instance="n1",job="hashi"}'
+        values: '30+60x90'
+      - series: 'hashi_mpc_nonce_local_skip_batches_total{instance="n1",job="hashi"}'
+        values: '1x90'
+      - series: 'uptime{version="v",sui_chain_id="s",bitcoin_chain_id="b",package_id="p",hashi_object_id="h",instance="n2",job="hashi"}'
+        values: '90000+60x90'
+      - series: 'hashi_mpc_nonce_local_skip_batches_total{instance="n2",job="hashi"}'
+        values: '3x90'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: discarded a nonce batch it could not build like its peers
+              description: *nonce_skipped
+      - eval_time: 59m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: discarded a nonce batch it could not build like its peers
+              description: *nonce_skipped
+      - eval_time: 60m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts: []
+
+  - name: a-restart-does-not-warn-for-an-old-nonce-batch-count
+    interval: 1m
+    input_series:
+      - series: 'uptime{version="v0",sui_chain_id="s",bitcoin_chain_id="b",package_id="p",hashi_object_id="h",instance="n1",job="hashi"}'
+        values: '90000+60x99'
+      - series: 'uptime{version="v",sui_chain_id="s",bitcoin_chain_id="b",package_id="p",hashi_object_id="h",instance="n1",job="hashi"}'
+        values: '_x102 30+60x30'
+      - series: 'hashi_mpc_nonce_local_skip_batches_total{instance="n1",job="hashi"}'
+        values: '5x99 _x3 0x29'
+    alert_rule_test:
+      - eval_time: 102m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts: []
+      - eval_time: 110m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts: []
+
   - name: mpc-peer-refused-in-its-first-sample
     interval: 1m
     input_series:
