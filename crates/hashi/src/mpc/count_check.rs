@@ -175,6 +175,25 @@ pub fn check_avss_message(bytes: &[u8], shape: AvssShape) -> CountCheckResult<()
     cursor.finish()
 }
 
+pub fn check_exact_avss_message(
+    bytes: &[u8],
+    threshold: u16,
+    weights: PartyWeights<'_>,
+) -> CountCheckResult<()> {
+    let shape = AvssShape {
+        threshold,
+        num_nodes: weights.num_nodes() as u16,
+    };
+    let mut cursor = Cursor::new(bytes);
+    let mut sizes = weights.0.iter().copied().map(avss_complaint_response_size);
+    walk_avss_message_with(&mut cursor, shape, |len| {
+        sizes
+            .next()
+            .map_or(Ok(()), |size| expect_bytes("ciphertext.encs", len, size))
+    })?;
+    cursor.finish()
+}
+
 pub fn check_rotation_messages(
     bytes: &[u8],
     shape: AvssShape,
@@ -222,8 +241,10 @@ impl AvssCiphertexts {
 pub fn avss_ciphertexts(bytes: &[u8], shape: AvssShape) -> CountCheckResult<AvssCiphertexts> {
     let mut cursor = Cursor::new(bytes);
     let mut lengths = Vec::with_capacity(shape.num_nodes.into());
-    let [ephemeral_keys, proof] =
-        walk_avss_message_with(&mut cursor, shape, |len| lengths.push(len))?;
+    let [ephemeral_keys, proof] = walk_avss_message_with(&mut cursor, shape, |len| {
+        lengths.push(len);
+        Ok(())
+    })?;
     cursor.finish()?;
     Ok(AvssCiphertexts {
         lengths,
@@ -387,13 +408,13 @@ pub fn check_held_avid_echoes(
 }
 
 fn walk_avss_message(cursor: &mut Cursor<'_>, shape: AvssShape) -> CountCheckResult<()> {
-    walk_avss_message_with(cursor, shape, |_| ()).map(drop)
+    walk_avss_message_with(cursor, shape, |_| Ok(())).map(drop)
 }
 
 fn walk_avss_message_with<'a>(
     cursor: &mut Cursor<'a>,
     shape: AvssShape,
-    mut ciphertext_len: impl FnMut(usize),
+    mut ciphertext_len: impl FnMut(usize) -> CountCheckResult<()>,
 ) -> CountCheckResult<[&'a [u8]; 2]> {
     const COMMITMENT: &str = "feldman_commitment";
     const ENCS: &str = "ciphertext.encs";
@@ -404,7 +425,7 @@ fn walk_avss_message_with<'a>(
     let encs = cursor.length(ENCS)?;
     expect_count(ENCS, encs, shape.num_nodes.into())?;
     for _ in 0..encs {
-        ciphertext_len(walk_bytes(cursor, ENCS)?);
+        ciphertext_len(walk_bytes(cursor, ENCS)?)?;
     }
     let proof = cursor.take("ciphertext.proof", DDH_NIZK)?;
     Ok([ephemeral_keys, proof])

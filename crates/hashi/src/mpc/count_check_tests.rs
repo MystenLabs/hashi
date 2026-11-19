@@ -114,8 +114,10 @@ fn crafted_rotation_map(keys: &[u16], message: &[u8]) -> Vec<u8> {
     bytes
 }
 
+const SKEWED_WEIGHTS: [u16; 5] = [5, 3, 1, 0, 1];
+
 static SKEWED_MESSAGE: LazyLock<(Vec<u8>, AvssShape)> = LazyLock::new(|| {
-    let (message, shape) = dealer_message(&[5, 3, 1, 0, 1], 4, 2);
+    let (message, shape) = dealer_message(&SKEWED_WEIGHTS, 4, 2);
     (bcs::to_bytes(&message).unwrap(), shape)
 });
 
@@ -175,6 +177,10 @@ fn trailing_or_missing_bytes_are_refused() {
     longer.push(0);
     assert_eq!(
         check_avss_message(&longer, *shape),
+        Err(CountCheckError::Trailing(1))
+    );
+    assert_eq!(
+        check_exact_avss_message(&longer, shape.threshold, PartyWeights(&SKEWED_WEIGHTS)),
         Err(CountCheckError::Trailing(1))
     );
     assert!(matches!(
@@ -376,7 +382,12 @@ fn dealer_messages_of_random_shapes_pass(
 fn every_ciphertext_has_its_recipients_complaint_response_length() {
     let weights = [0, 1, 127, 128, 300];
     let (message, shape) = dealer_message(&weights, 2, 1);
-    let ciphertexts = avss_ciphertexts(&bcs::to_bytes(&message).unwrap(), shape).unwrap();
+    let bytes = bcs::to_bytes(&message).unwrap();
+    assert_eq!(
+        check_exact_avss_message(&bytes, shape.threshold, PartyWeights(&weights)),
+        Ok(())
+    );
+    let ciphertexts = avss_ciphertexts(&bytes, shape).unwrap();
     for (party, &weight) in weights.iter().enumerate() {
         assert_eq!(
             ciphertexts.length(party as PartyId),

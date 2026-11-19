@@ -20376,6 +20376,11 @@ fn send_messages_count_checks_before_the_manager_lock() {
     let mut miscounted = undecodable.clone();
     miscounted[encs_count] += 1;
     miscounted.insert(miscounted.len() - 96, 0);
+    let paddable: PaddableAvssMessage = bcs::from_bytes(&honest).unwrap();
+    let honest_len = paddable.encs[2].len();
+    let padded = bcs::to_bytes(&pad_ciphertext(&bcs::from_bytes(&honest).unwrap(), 2)).unwrap();
+    stored_rows::check_dkg_message(&manager.shape_params(), epoch, &setup.address(1), &padded)
+        .unwrap();
 
     let tmpdir = tempfile::Builder::new().tempdir().unwrap();
     let mut config = crate::config::Config::new_for_testing();
@@ -20407,20 +20412,20 @@ fn send_messages_count_checks_before_the_manager_lock() {
     };
 
     let held = mpc_lock.write().unwrap();
-    let refusals = [miscounted, undecodable].map(|message| {
+    let refusals = [miscounted, undecodable, padded].map(|message| {
         let handler = send(message);
         rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), handler).await })
     });
     drop(held);
-    let [miscounted, undecodable] = refusals.map(|refused| {
+    let [miscounted, undecodable, padded] = refusals.map(|refused| {
         refused
             .expect("the refusal waited for the manager lock")
             .unwrap()
             .unwrap_err()
     });
     assert_eq!(
-        (miscounted.code(), undecodable.code()),
-        (tonic::Code::InvalidArgument, tonic::Code::InvalidArgument)
+        [miscounted.code(), undecodable.code(), padded.code()],
+        [tonic::Code::InvalidArgument; 3]
     );
     assert!(
         miscounted.message().contains("ciphertext.encs"),
@@ -20432,13 +20437,21 @@ fn send_messages_count_checks_before_the_manager_lock() {
         "{}",
         undecodable.message()
     );
+    assert!(
+        padded.message().contains(&format!(
+            "ciphertext.encs: {} bytes, expected {honest_len}",
+            honest_len + 1
+        )),
+        "{}",
+        padded.message()
+    );
     let sender = setup.address(1).to_string();
     assert_eq!(
         metrics
             .mpc_peer_refusals_total
             .with_label_values(&[&sender, "request"])
             .get(),
-        2
+        3
     );
     assert!(
         metrics
@@ -20452,7 +20465,7 @@ fn send_messages_count_checks_before_the_manager_lock() {
             .mpc_refusals_total
             .with_label_values(&["request", "send_messages", "dkg", reason])
             .get()),
-        [1, 1]
+        [2, 1]
     );
 
     let accepted = rt.block_on(send(honest)).unwrap();
@@ -20478,7 +20491,7 @@ fn send_messages_count_checks_before_the_manager_lock() {
             .mpc_peer_refusals_total
             .with_label_values(&[&caller.to_string(), "request"])
             .get()),
-        [3, 0]
+        [4, 0]
     );
 }
 
@@ -20667,11 +20680,21 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
         .build()
         .unwrap();
 
-    let rotation_setup = RotationTestSetup::new();
+    let mut rotation_setup = RotationTestSetup::new();
     let dealer = rotation_setup.setup.address(0);
-    let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
-    let (mut receiver, dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
-    receiver.set_previous_output(dkg_output);
+    let completed_dkg = |index| {
+        let (manager, output) = rotation_setup.create_receiver_with_memory_store(index);
+        (output, Arc::clone(&manager.public_messages_store))
+    };
+    let (dealer_output, dealer_store) = completed_dkg(0);
+    let (receiver_output, receiver_store) = completed_dkg(2);
+    rotation_setup.shrink_to_next_epoch(3);
+    let messages = Messages::Rotation(
+        rotation_setup
+            .rotation_manager_at_target(0, dealer_output.clone(), dealer_store)
+            .create_rotation_messages(&dealer_output, &mut rand::thread_rng()),
+    );
+    let receiver = rotation_setup.rotation_manager_at_target(2, receiver_output, receiver_store);
     let epoch = receiver.mpc_config.epoch;
     let Some(proto::send_messages_request::Messages::RotationMessages(honest)) =
         SendMessagesRequest { messages }.to_proto(epoch).messages
@@ -20685,6 +20708,13 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     duplicated.last_mut().unwrap().0 = honest[0].0;
     let mut oversized = honest.clone();
     oversized.push((u16::MAX.into(), honest[0].1.clone()));
+    let entry = honest[0].1.value.as_deref().unwrap();
+    let paddable: PaddableAvssMessage = bcs::from_bytes(entry).unwrap();
+    let honest_len = paddable.encs[1].len();
+    let mut padded = honest.clone();
+    padded[0].1 = bcs::to_bytes(&pad_ciphertext(&bcs::from_bytes(entry).unwrap(), 1))
+        .unwrap()
+        .into();
 
     let tmpdir = tempfile::Builder::new().tempdir().unwrap();
     let mut config = crate::config::Config::new_for_testing();
@@ -20721,18 +20751,28 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     for (entries, reason) in [
         (
             unowned_first,
-            "share index 65535 is zero or not owned by the dealer".to_string(),
+            "rotation_messages: share index 65535 is zero or not owned by the dealer".to_string(),
         ),
         (
             duplicated,
-            format!("share index {} appears more than once", honest[0].0),
+            format!(
+                "rotation_messages: share index {} appears more than once",
+                honest[0].0
+            ),
         ),
         (
             oversized,
             format!(
-                "{} entries, at most {} allowed",
+                "rotation_messages: {} entries, at most {} allowed",
                 honest.len() + 1,
                 honest.len()
+            ),
+        ),
+        (
+            padded,
+            format!(
+                "ciphertext.encs: {} bytes, expected {honest_len}",
+                honest_len + 1
             ),
         ),
     ] {
@@ -20746,7 +20786,7 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
         assert!(
             refused
                 .message()
-                .contains(&format!("count check: rotation_messages: {reason}")),
+                .contains(&format!("count check: {reason}")),
             "{}",
             refused.message()
         );
