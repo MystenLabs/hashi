@@ -409,6 +409,30 @@ tests:
               summary: MPC work started outside the per-peer budget
               description: *unguarded
 
+  - name: a-skipped-nonce-batch-warns-for-an-hour
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_nonce_local_skip_batches_total{instance="n1",job="hashi"}'
+        values: '0x59 1x180'
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: discarded a nonce batch it could not build like its peers
+              description: >-
+                This node skipped a dealer and threw the nonce batch away. It
+                builds no later batch this epoch until a retry works. If this
+                keeps firing, fix HashiSuiMirrorStale if that fires too, otherwise
+                tell the operator channel.
+      - eval_time: 125m
+        alertname: HashiNonceBatchSkipped
+        exp_alerts: []
+
   - name: mpc-peer-refused-in-its-first-sample
     interval: 1m
     input_series:

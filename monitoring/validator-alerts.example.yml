@@ -130,6 +130,18 @@ groups:
             Never add a complaint-response-policy entry on your own: one wrong
             entry can leak your shares.
 
+      - alert: HashiNonceBatchSkipped
+        expr: increase(hashi_mpc_nonce_local_skip_batches_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "discarded a nonce batch it could not build like its peers"
+          description: >-
+            This node skipped a dealer and threw the nonce batch away. It
+            builds no later batch this epoch until a retry works. If this
+            keeps firing, fix HashiSuiMirrorStale if that fires too, otherwise
+            tell the operator channel.
+
       - alert: HashiWithdrawalFailsBitcoinScripts
         expr: increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0
         labels:
