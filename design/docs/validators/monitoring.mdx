@@ -78,7 +78,7 @@ Notes:
 
 | Metric | Type | What to Watch |
 |--------|------|---------------|
-| `uptime` | counter | Node uptime (s). Labels: `version`, `sui_chain_id`, `bitcoin_chain_id`, `package_id`, `hashi_object_id`. |
+| `uptime` | counter | Node uptime (s). Labels: `version`, `sui_chain_id`, `bitcoin_chain_id`, `package_id`, `hashi_object_id`. The nonce batch alert needs it with exactly these labels. |
 | `hashi_epoch` | gauge | Current Hashi epoch. Should advance with Sui epochs. |
 | `hashi_sui_epoch` | gauge | Current Sui epoch. |
 | `hashi_sui_rpc_info` | gauge | Configured Sui RPC endpoint. The `endpoint` label identifies the fullnode used by this validator. |
@@ -163,5 +163,5 @@ See [Committee](../committee.mdx) for what membership means and how Hashi derive
 | A peer's MPC requests or responses refused in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch (`reason="hash"` in `hashi_mpc_refusals_total`) can also come from an honest signer that lost its stored copy. Look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
 | MPC messages from 3 or more peers, and more than half of the committee, refused within 10 min | Critical | Usually your node's checks and its peers' messages disagree. Compare your build with the refused peers' first, from each node's `GetServiceInfo` reply: in a staged rollout, nodes on different builds can refuse each other's messages. Tell the operator channel. |
 | Your node refused one of its own stored MPC rows in the last hour | Warning | Its store is damaged or, when several nodes see this right after an upgrade, the new build refuses what an earlier one accepted. A rotation that needs the row can fail. Tell the operator channel with your version and the alert's `phase`. |
-| `increase(hashi_mpc_nonce_local_skip_batches_total[1h]) > 0` | Warning | Your node skipped a dealer and threw the nonce batch away, and builds no later batch this epoch until a retry works. If the alert keeps firing, fix `HashiSuiMirrorStale` first if that is firing too, otherwise tell the operator channel. |
+| `hashi_mpc_nonce_local_skip_batches_total` rose in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | Your node skipped a dealer and threw the nonce batch away. This can delay signing. If the alert keeps firing, fix `HashiSuiMirrorStale` first if that is firing too, otherwise tell the operator channel. |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
