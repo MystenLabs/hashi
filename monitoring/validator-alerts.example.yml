@@ -64,15 +64,17 @@ groups:
             minutes. It has deadlocked or is stuck; check its logs.
 
       - alert: HashiReconfigNotTracking
-        expr: changes(hashi_epoch[3h]) == 0
+        expr: hashi_epoch < hashi_sui_epoch and hashi_reconfig_hold == 0
+        for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "committee epoch not advancing"
+          summary: "committee epoch behind the Sui epoch"
           description: >-
-            Testnet reconfigures roughly every 40 minutes. Check the
-            operator channel first: if the fleet is reconfiguring and your
-            epoch is not moving, your node is stuck.
+            Hashi reconfigures at every Sui epoch change, so the committee
+            epoch should catch up with the Sui epoch within minutes. Check
+            the operator channel first: if the fleet is reconfiguring and
+            your epoch is not moving, your node is stuck.
 
       - alert: HashiLowGas
         expr: hashi_sui_balance < 1e9

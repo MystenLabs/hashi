@@ -54,7 +54,7 @@ Each archive holds:
 It does **not** hold the public certificate that `backup-pgp-cert` points to, the `hashi` binary, or your service unit. Keep those with your deployment files.
 
 The `[backup-remote]` table in the [config template](configuration.mdx#validator-config)
-enables uploads to one S3 or GCS bucket. The destination URI selects the provider:
+enables uploads to one S3 or GCS bucket (not in the 1.0 releases, which save backups locally only). The destination URI selects the provider:
 `s3://bucket/` requires a region and uses the AWS default credential chain;
 `gs://bucket/` has no region and uses native Application Default Credentials (ADC).
 Each scheduled backup saves locally before attempting a create-only upload;

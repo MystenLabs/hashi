@@ -98,6 +98,8 @@ so a vote can rest on a verdict that old. Each committee member, and the node
 itself, may also spend only a limited number of TRM calls at a node
 (`trm-per-caller-burst`, `trm-per-caller-refill-per-sec`); past that limit the
 node declines for now and the request is retried, as during a TRM outage.
+Verdict reuse and per-caller budgets are not in the 1.0 releases: a 1.0 node
+asks TRM again for every screening and has none of these 3 settings.
 
 ## When sanctions checks apply
 

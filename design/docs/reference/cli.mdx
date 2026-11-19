@@ -190,6 +190,7 @@ Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Local resto
 ```bash
 # Create a backup (uses the required configured cert unless overridden inline/by path).
 # Stop the node first: backup save opens its database and refuses while the node holds it.
+# --local-only is not in the 1.0 releases.
 hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .] [--local-only]
 
 # Restore an encrypted .tar.asc — exactly one decryptor is required:
@@ -199,14 +200,14 @@ hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-di
 # Restore a local unencrypted .tar — no key needed
 hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
 
-# Restore an S3 object; optionally pin its version:
+# Restore an S3 object; optionally pin its version (not in the 1.0 releases):
 hashi backup restore 's3://<bucket>/<key>.tar.asc' --region <aws-region> [--version-id <version-id>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 
-# Restore a GCS object; optionally pin its generation:
+# Restore a GCS object; optionally pin its generation (not in the 1.0 releases):
 hashi backup restore 'gs://<bucket>/<key>.tar.asc' [--generation <positive-integer>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 ```
 
-With `[backup-remote]` in the node config, `backup save` uploads after saving
+Remote backups are not in the 1.0 releases. With `[backup-remote]` in the node config, `backup save` uploads after saving
 locally. Set `destination = "s3://bucket/"` with `region = "<aws-region>"`, or
 `destination = "gs://bucket/"` without a region; the URI scheme selects the
 backend. `--local-only` bypasses all remote uploads. Upload failure retains the

@@ -392,6 +392,8 @@ For remote restore commands and an on-page recovery checklist, see
 
 ## Remote backups
 
+> **Not in the 1.0 releases.** `mainnet-1.0` and `testnet-1.0` save backups locally only. They have no `[backup-remote]` table, and a 1.0 node refuses to start on a config that sets one. They also cannot restore from an `s3://` or `gs://` URI. On 1.0, copy archives off the machine yourself, as in [Monthly off-machine copy](#monthly-off-machine-copy).
+
 Configure one remote destination using a `[backup-remote]` table.
 For S3, `region` is required:
 
