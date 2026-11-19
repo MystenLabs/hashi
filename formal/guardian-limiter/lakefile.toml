@@ -1,0 +1,20 @@
+name = "limiter-proof"
+defaultTargets = ["LimiterProof", "LimiterSanity"]
+
+[[require]]
+name = "aeneas"
+git = "https://github.com/AeneasVerif/aeneas"
+rev = "nightly-2026.11.19-8f4466d"
+subDir = "backends/lean"
+
+[[lean_lib]]
+name = "HashiTypes"
+
+[[lean_lib]]
+name = "LimiterSpec"
+
+[[lean_lib]]
+name = "LimiterProof"
+
+[[lean_lib]]
+name = "LimiterSanity"

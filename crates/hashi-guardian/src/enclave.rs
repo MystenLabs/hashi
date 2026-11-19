@@ -387,6 +387,7 @@ impl EnclaveState {
     /// Consume tokens and return the post-consume state.
     pub fn consume_from_limiter(
         &mut self,
+        guardian_now: u64,
         seq: u64,
         timestamp: u64,
         amount_sats: u64,
@@ -395,7 +396,7 @@ impl EnclaveState {
             .rate_limiter
             .as_mut()
             .ok_or_else(|| InternalError("rate limiter not initialized".into()))?;
-        limiter.consume(seq, timestamp, amount_sats)?;
+        limiter.consume_at(guardian_now, seq, timestamp, amount_sats)?;
         Ok(*limiter.state())
     }
 

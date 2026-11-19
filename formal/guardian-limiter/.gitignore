@@ -1,0 +1,4 @@
+# Aeneas generates this file. Run `./extract.sh` to make it.
+/HashiTypes.lean
+# Lean build output and downloaded libraries.
+/.lake/

@@ -5,7 +5,6 @@ use super::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::AddressValidation;
-use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
@@ -16,10 +15,6 @@ use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalLogMessage;
 use tracing::debug;
 use tracing::info;
-
-const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
-// Requests are minted per attempt and should not remain usable indefinitely.
-const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
 
 pub async fn standard_withdrawal(
     enclave: &mut Enclave,
@@ -51,7 +46,7 @@ pub async fn standard_withdrawal(
 
     // 2) Rate limits: consume tokens. The control lock keeps this consumption
     //    exclusive until it is durably logged or the enclave aborts.
-    validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
+    let guardian_now = now_timestamp_secs();
 
     debug!("Checking rate limits.");
     // Gross outflow (= inputs - change = external_out + miner_fee).
@@ -59,10 +54,12 @@ pub async fn standard_withdrawal(
     // change flows back, so it must not.
     let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
     let seq = request.seq();
-    let post_state =
-        enclave
-            .state
-            .consume_from_limiter(seq, request.timestamp_secs(), consumed_amount_sats)?;
+    let post_state = enclave.state.consume_from_limiter(
+        guardian_now,
+        seq,
+        request.timestamp_secs(),
+        consumed_amount_sats,
+    )?;
     debug!("Rate limit check passed.");
 
     // 3) Sign tx (while holding the control lock)
@@ -99,32 +96,6 @@ pub async fn standard_withdrawal(
     Ok(enclave.sign(response))
 }
 
-fn validate_request_timestamp(
-    request_timestamp_secs: u64,
-    guardian_now: u64,
-) -> GuardianResult<()> {
-    // Ensure that a compromised hashi committee cannot set an arbitrary time
-    // in the future, which in turn allows bypassing the limiter completely.
-    if request_timestamp_secs > guardian_now + MAX_CLOCK_SKEW_SECS {
-        return Err(InvalidInputs(format!(
-            "request timestamp {} is too far in the future (guardian clock: {})",
-            request_timestamp_secs, guardian_now
-        )));
-    }
-
-    // This check is useful for situations where there is a big time gap between
-    // consecutive withdrawals. A compromised hashi committee can exploit that
-    // gap by carefully choosing timestamps until gap * refill_rate is extracted.
-    if guardian_now.saturating_sub(request_timestamp_secs) > MAX_REQUEST_AGE_SECS {
-        return Err(InvalidInputs(format!(
-            "request timestamp {} is too old (guardian clock: {}, maximum age: {} seconds)",
-            request_timestamp_secs, guardian_now, MAX_REQUEST_AGE_SECS
-        )));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +105,7 @@ mod tests {
     use hashi_types::bitcoin::BitcoinKeypair;
     use hashi_types::bitcoin::HashiMasterG;
     use hashi_types::bitcoin::BTC_LIB;
+    use hashi_types::guardian::limiter::MAX_REQUEST_AGE_SECS;
     use hashi_types::guardian::EnclaveLifecycle;
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommittee;
@@ -333,29 +305,6 @@ mod tests {
         assert_eq!(request_data.seq, 0);
         assert_eq!(post_state.next_seq, 1);
         assert_eq!(post_state.num_tokens_available, 0);
-    }
-
-    #[test]
-    fn test_request_timestamp_bounds() {
-        const GUARDIAN_NOW: u64 = 1_000_000;
-
-        assert!(
-            validate_request_timestamp(GUARDIAN_NOW - MAX_REQUEST_AGE_SECS, GUARDIAN_NOW).is_ok()
-        );
-        assert!(
-            validate_request_timestamp(GUARDIAN_NOW + MAX_CLOCK_SKEW_SECS, GUARDIAN_NOW).is_ok()
-        );
-
-        let too_old =
-            validate_request_timestamp(GUARDIAN_NOW - MAX_REQUEST_AGE_SECS - 1, GUARDIAN_NOW);
-        assert!(matches!(too_old, Err(InvalidInputs(message)) if message.contains("too old")));
-
-        let too_far_in_the_future =
-            validate_request_timestamp(GUARDIAN_NOW + MAX_CLOCK_SKEW_SECS + 1, GUARDIAN_NOW);
-        assert!(matches!(
-            too_far_in_the_future,
-            Err(InvalidInputs(message)) if message.contains("too far in the future")
-        ));
     }
 
     #[tokio::test]

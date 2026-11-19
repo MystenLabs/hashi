@@ -8,6 +8,11 @@ use super::GuardianResult;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// Maximum time that a request timestamp can be ahead of the Guardian clock.
+pub const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
+/// Maximum age of a request timestamp. Requests are minted per attempt.
+pub const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
+
 /// Immutable configuration for the token bucket rate limiter.
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimiterConfig {
@@ -52,11 +57,40 @@ impl LimiterState {
     /// A timestamp before `last_updated_at` gives no refill.
     pub fn capacity_at(&self, config: &LimiterConfig, timestamp: u64) -> u64 {
         let elapsed = timestamp.saturating_sub(self.last_updated_at);
-        let refilled = elapsed.saturating_mul(config.refill_rate);
+        // Aeneas has no model for `saturating_mul`. This form is equivalent.
+        #[allow(clippy::manual_saturating_arithmetic)]
+        let refilled = elapsed.checked_mul(config.refill_rate).unwrap_or(u64::MAX);
         self.num_tokens_available
             .saturating_add(refilled)
             .min(config.max_bucket_capacity)
     }
+}
+
+/// Check a request timestamp against the Guardian clock.
+pub fn validate_request_timestamp(
+    request_timestamp_secs: u64,
+    guardian_now: u64,
+) -> GuardianResult<()> {
+    // Ensure that a compromised hashi committee cannot set an arbitrary time
+    // in the future, which in turn allows bypassing the limiter completely.
+    if request_timestamp_secs > guardian_now + MAX_CLOCK_SKEW_SECS {
+        return Err(InvalidInputs(format!(
+            "request timestamp {} is too far in the future (guardian clock: {})",
+            request_timestamp_secs, guardian_now
+        )));
+    }
+
+    // This check is useful for situations where there is a big time gap between
+    // consecutive withdrawals. A compromised hashi committee can exploit that
+    // gap by carefully choosing timestamps until gap * refill_rate is extracted.
+    if guardian_now.saturating_sub(request_timestamp_secs) > MAX_REQUEST_AGE_SECS {
+        return Err(InvalidInputs(format!(
+            "request timestamp {} is too old (guardian clock: {}, maximum age: {} seconds)",
+            request_timestamp_secs, guardian_now, MAX_REQUEST_AGE_SECS
+        )));
+    }
+
+    Ok(())
 }
 
 /// Token bucket rate limiter. Tokens refill linearly over time.
@@ -87,6 +121,18 @@ impl RateLimiter {
 
     pub fn next_seq(&self) -> u64 {
         self.state.next_seq
+    }
+
+    /// Check `timestamp` against the Guardian clock, then consume tokens.
+    pub fn consume_at(
+        &mut self,
+        guardian_now: u64,
+        seq: u64,
+        timestamp: u64,
+        amount_sats: u64,
+    ) -> GuardianResult<()> {
+        validate_request_timestamp(timestamp, guardian_now)?;
+        self.consume(seq, timestamp, amount_sats)
     }
 
     /// Consume tokens from the bucket. Validates seq and timestamp ordering,
@@ -123,6 +169,29 @@ impl RateLimiter {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_request_timestamp_bounds() {
+        const GUARDIAN_NOW: u64 = 1_000_000;
+
+        assert!(
+            validate_request_timestamp(GUARDIAN_NOW - MAX_REQUEST_AGE_SECS, GUARDIAN_NOW).is_ok()
+        );
+        assert!(
+            validate_request_timestamp(GUARDIAN_NOW + MAX_CLOCK_SKEW_SECS, GUARDIAN_NOW).is_ok()
+        );
+
+        let too_old =
+            validate_request_timestamp(GUARDIAN_NOW - MAX_REQUEST_AGE_SECS - 1, GUARDIAN_NOW);
+        assert!(matches!(too_old, Err(InvalidInputs(message)) if message.contains("too old")));
+
+        let too_far_in_the_future =
+            validate_request_timestamp(GUARDIAN_NOW + MAX_CLOCK_SKEW_SECS + 1, GUARDIAN_NOW);
+        assert!(matches!(
+            too_far_in_the_future,
+            Err(InvalidInputs(message)) if message.contains("too far in the future")
+        ));
+    }
 
     fn make_limiter() -> (LimiterConfig, LimiterState) {
         let config = LimiterConfig {
