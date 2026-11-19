@@ -13121,6 +13121,43 @@ fn a_padded_accuser_ciphertext_is_answered_only_with_a_valid_proof() {
 }
 
 #[test]
+fn a_padded_accuser_ciphertext_is_not_answered_from_another_dealings_output() {
+    let fixture = PaddedComplaintFixture::dkg();
+    let mut responder = fixture.responder_with(pad_ciphertext(&fixture.honest, PADDED_ACCUSER));
+    let Ok(ComplaintResponse::Dkg(answered)) =
+        fixture.complain(&mut responder, &fixture.valid_complaint)
+    else {
+        panic!("expected a DKG complaint response");
+    };
+    let position = fixture
+        .rotation_setup
+        .dealer_indices
+        .iter()
+        .position(|&idx| idx == PADDED_DEPARTING)
+        .unwrap();
+    let Messages::Dkg(other_dealing) = &fixture.rotation_setup.dealer_messages[position] else {
+        panic!("expected a DKG message");
+    };
+    let other: PaddableAvssMessage =
+        bcs::from_bytes(&bcs::to_bytes(other_dealing).unwrap()).unwrap();
+    responder.dealer_outputs.insert(
+        DealerOutputsKey::Dkg(fixture.dealer),
+        avss::AvssOutput {
+            feldman_commitment: other.feldman_commitment,
+            my_shares: answered.shares,
+        },
+    );
+    let result = fixture.complain(&mut responder, &fixture.valid_complaint);
+    assert!(
+        matches!(
+            &result,
+            Err(MpcError::CryptoError(reason)) if reason == WRONG_LENGTH_OUTPUT_FOR_ANOTHER_DEALING
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn an_honest_accuser_ciphertext_keeps_todays_complaint_check() {
     for fixture in [
         PaddedComplaintFixture::rotation(),

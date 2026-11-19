@@ -7306,6 +7306,8 @@ const WRONG_LENGTH_OWN_CIPHERTEXT: &str =
     "Peer is also a victim of this dealer: its ciphertext for this node has the wrong length";
 const WRONG_LENGTH_ACCUSER_CIPHERTEXT: &str =
     "the accuser's ciphertext has the wrong length, and its recovery proof is invalid";
+const WRONG_LENGTH_OUTPUT_FOR_ANOTHER_DEALING: &str =
+    "the accuser's ciphertext has the wrong length, and this node's output is for another dealing";
 
 fn has_honest_ciphertext_length(
     nodes: &Nodes<EncryptionGroupElement>,
@@ -7339,6 +7341,13 @@ fn wrong_length_accuser_complaint_response(
 ) -> MpcResult<Option<avss::ComplaintResponse>> {
     (!has_honest_ciphertext_length(nodes, accuser_id, ciphertexts)?)
         .then(|| -> MpcResult<avss::ComplaintResponse> {
+            let held =
+                bcs::to_bytes(&output.feldman_commitment).expect(EXPECT_SERIALIZATION_SUCCESS);
+            (held == ciphertexts.commitment())
+                .then_some(())
+                .ok_or_else(|| {
+                    MpcError::CryptoError(WRONG_LENGTH_OUTPUT_FOR_ANOTHER_DEALING.into())
+                })?;
             let shared: SharedComponents<EncryptionGroupElement> =
                 bcs::from_bytes(ciphertexts.shared_components())
                     .map_err(|e| MpcError::CryptoError(e.to_string()))?;

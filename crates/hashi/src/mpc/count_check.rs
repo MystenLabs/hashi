@@ -225,12 +225,17 @@ pub fn avss_complaint_response_size(responder_weight: u16) -> usize {
 
 pub struct AvssCiphertexts {
     lengths: Vec<usize>,
+    commitment: Vec<u8>,
     shared_components: Vec<u8>,
 }
 
 impl AvssCiphertexts {
     pub fn length(&self, party: PartyId) -> Option<usize> {
         self.lengths.get(usize::from(party)).copied()
+    }
+
+    pub fn commitment(&self) -> &[u8] {
+        &self.commitment
     }
 
     pub fn shared_components(&self) -> &[u8] {
@@ -241,13 +246,14 @@ impl AvssCiphertexts {
 pub fn avss_ciphertexts(bytes: &[u8], shape: AvssShape) -> CountCheckResult<AvssCiphertexts> {
     let mut cursor = Cursor::new(bytes);
     let mut lengths = Vec::with_capacity(shape.num_nodes.into());
-    let [ephemeral_keys, proof] = walk_avss_message_with(&mut cursor, shape, |len| {
+    let [commitment, ephemeral_keys, proof] = walk_avss_message_with(&mut cursor, shape, |len| {
         lengths.push(len);
         Ok(())
     })?;
     cursor.finish()?;
     Ok(AvssCiphertexts {
         lengths,
+        commitment: commitment.to_vec(),
         shared_components: [ephemeral_keys, proof].concat(),
     })
 }
@@ -415,12 +421,15 @@ fn walk_avss_message_with<'a>(
     cursor: &mut Cursor<'a>,
     shape: AvssShape,
     mut ciphertext_len: impl FnMut(usize) -> CountCheckResult<()>,
-) -> CountCheckResult<[&'a [u8]; 2]> {
+) -> CountCheckResult<[&'a [u8]; 3]> {
     const COMMITMENT: &str = "feldman_commitment";
     const ENCS: &str = "ciphertext.encs";
+    let bytes = cursor.bytes;
+    let start = cursor.position;
     let points = cursor.length(COMMITMENT)?;
     expect_count(COMMITMENT, points, shape.threshold.into())?;
     cursor.skip_elements(COMMITMENT, points, POINT)?;
+    let commitment = &bytes[start..cursor.position];
     let ephemeral_keys = cursor.take("ciphertext", 2 * EG_POINT)?;
     let encs = cursor.length(ENCS)?;
     expect_count(ENCS, encs, shape.num_nodes.into())?;
@@ -428,7 +437,7 @@ fn walk_avss_message_with<'a>(
         ciphertext_len(walk_bytes(cursor, ENCS)?)?;
     }
     let proof = cursor.take("ciphertext.proof", DDH_NIZK)?;
-    Ok([ephemeral_keys, proof])
+    Ok([commitment, ephemeral_keys, proof])
 }
 
 fn walk_avss_common_message(
