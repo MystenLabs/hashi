@@ -5,6 +5,18 @@ rules file lives at [`monitoring/validator-alerts.example.yml`](../monitoring/va
 [`monitoring/validator-alerts.test.yml`](../monitoring/validator-alerts.test.yml) has `promtool`
 tests for the peer, pause, MPC work and MPC refusal alerts.
 
+> **On the 1.0 releases.** `mainnet-1.0` and `testnet-1.0` do not export the
+> metrics behind 9 of these rules, so on 1.0 they never fire:
+> `HashiWithdrawalFailsBitcoinScripts`, `HashiWithdrawalCheckBlind`,
+> `HashiSigningRequestedWhilePaused`, `HashiMpcPeerRefused`,
+> `HashiMpcPeersRefusedAtOnce`, `HashiMpcStoredRowsRefused`,
+> `HashiMpcWorkUnguarded`, `HashiTobWritesUntracked` and
+> `HashiTobBucketIdMismatch`. `HashiPeerShed` and `HashiPeersShedAtOnce` see
+> only `hashi_peer_requests_shed_total` on 1.0. Loading the rules is safe, but
+> don't count on these alerts until you run a later release. See
+> [Monitoring](../design/docs/validators/monitoring.mdx) for the matching
+> metric notes.
+
 Two principles shape this list:
 
 1. **Node-local vs bridge-wide.** Some `hashi_*` metrics describe *your node*
@@ -19,12 +31,12 @@ Two principles shape this list:
 
 | Alert                   | Expression                                                            | Why this threshold                                                                                                                                                                                                        |
 |-------------------------|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| BTC view frozen         | `changes(hashi_kyoto_best_height[90m]) == 0`                          | Signet produces ~1 block/10 min, so a healthy tip ticks ~6×/hour. 90 minutes of silence is a stuck BTC view, not a quiet chain.                                                                                           |
+| BTC view frozen         | `changes(hashi_kyoto_best_height[3h]) == 0`                           | Bitcoin Mainnet and Signet both average a block every 10 minutes, but Mainnet gaps over 90 minutes happen several times a year. 3 hours of silence is a stuck BTC view, not a quiet chain. |
 | BTC not synced          | `hashi_kyoto_synced == 0` for 15m                                     | Brief resyncs are normal after restarts; sustained unsync is not.                                                                                                                                                         |
 | No BTC peers            | `hashi_kyoto_connected_peers < 1` for 10m                             | No peers means no blocks, ahead of the tip going stale.                                                                                                                                                                   |
 | Sui mirror stale        | `time() - (hashi_latest_checkpoint_timestamp_ms / 1000) > 120` for 5m | The state watcher applies checkpoints continuously. Two minutes without an applied checkpoint means the watcher, mirror, or fullnode RPC is wedged — the node acts on stale bridge state while looking healthy elsewhere. |
 | Task wedged             | `time() - hashi_task_last_iteration_timestamp_seconds > 600`          | Each labeled task loop (`state_watcher`, `leader_loop`, `mpc_service`) records a heartbeat at least every 15s when idle, and `mpc_service` also records them while it waits for presignature certificates. A stale heartbeat catches a task that is deadlocked, blocked on a call that never returns, or stuck retrying a failed DKG or key rotation, inside an otherwise-alive process. |
-| Reconfig not tracking   | `changes(hashi_epoch[3h]) == 0`                                       | Testnet reconfigures roughly every 40 minutes. If the committee epoch stops moving, either your node stopped following reconfig or the fleet itself stalled — check the operator channel before assuming local fault.     |
+| Reconfig not tracking   | `hashi_epoch < hashi_sui_epoch` for 30m | Hashi reconfigures at every Sui epoch change and a reconfiguration normally finishes within minutes, so the threshold holds whatever the network's epoch length. The rule also fires, as intended, before genesis and while governance holds reconfiguration (`hashi_reconfig_hold` at 1). With nothing pending (`hashi_reconfig_in_progress` at 0), for example after a hold is cleared, Hashi waits for the next Sui epoch unless someone runs `hashi committee start-reconfig` (see [Stuck reconfigurations](../design/docs/validators/epoch-changes.mdx#stuck-reconfigurations)). Otherwise check the operator channel before assuming local fault. |
 | Low gas                 | `hashi_sui_balance < 1e9`                                             | Below 1 SUI the operator wallet is close to unable to submit. Refill.                                                                                                                                                     |
 | Binary behind chain     | `hashi_package_version_unsupported == 1`                              | The chain moved to a package version this binary does not implement; autonomous writes are halted. Upgrade the binary immediately.                                                                                        |
 | Database poisoned       | `hashi_db_poisoned == 1`                                              | fjall refuses every write after a failed flush or fsync (usually a full disk) until the process restarts, while reads and signing carry on looking healthy. Free the disk, then restart.                                  |

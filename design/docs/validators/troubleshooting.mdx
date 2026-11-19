@@ -91,23 +91,23 @@ bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee
 
 **Symptom:** the node rejects the config file on load because of an unknown field.
 
-**Likely cause:** a misspelled or wrongly-cased key. The validator config rejects unknown fields outright, and its keys are **kebab-case** (`sui-rpc`, `bitcoin-chain-id`, `tls-private-key`), not snake_case. The **CLI** config in [CLI config](configuration.mdx#cli-config) uses snake_case (`sui_rpc_url`, `package_id`), so the two files do not share a convention.
+**Likely cause:** a key the binary does not know. Usually it is misspelled or wrongly cased, but on the 1.0 releases it can also be a correctly spelled setting added after 1.0, such as `[backup-remote]` or `trm-verdict-reuse-ms`; the templates mark these `(not in the 1.0 releases)`. The validator config rejects unknown fields outright, and its keys are **kebab-case** (`sui-rpc`, `bitcoin-chain-id`, `tls-private-key`), not snake_case. The **CLI** config in [CLI config](configuration.mdx#cli-config) uses snake_case (`sui_rpc_url`, `package_id`), so the two files do not share a convention.
 
-**Fix:** correct the key to kebab-case and re-check it against the template in [Validator config](configuration.mdx#validator-config).
+**Fix:** correct the key to kebab-case and re-check it against the template in [Validator config](configuration.mdx#validator-config). On 1.0, comment out any setting the template marks as not in the 1.0 releases.
 
 ---
 
-**Symptom:** startup fails with `refusing package-id ... on Sui mainnet: ...`, `refusing hashi-object-id ... on Sui mainnet: ...`, or `refusing the mainnet hashi-ids (...) on Sui chain ...: they are allowed on Sui mainnet only ...`.
+**Symptom:** (not in the 1.0 releases) startup fails with `refusing package-id ... on Sui mainnet: ...`, `refusing hashi-object-id ... on Sui mainnet: ...`, or `refusing the mainnet hashi-ids (...) on Sui chain ...: they are allowed on Sui mainnet only ...`.
 
 **Likely cause:** the `[hashi-ids]` section does not match the Sui network. Sui Mainnet accepts only the published Mainnet IDs, and no other network accepts them. On Sui Testnet the usual case is a missing `[hashi-ids]` section, which defaults to the Mainnet IDs. `hashi register` reports the same error for the same config.
 
-**Fix:** set both IDs from the [Networks](../reference/networks.mdx) table for your Sui network. On Mainnet you can instead remove the section to use the default.
+**Fix:** set both IDs from the [Networks](../reference/networks.mdx) table for your Sui network. On Mainnet, releases after 1.0 also let you remove the section to use the default. The 1.0 releases have no Mainnet default: without `[hashi-ids]` they use zero IDs and fail at the first onchain read, so always set the section on 1.0.
 
 ---
 
 **Symptom:** startup fails, after the Sui chain-ID check, with the fullnode's error for a missing object.
 
-**Likely cause:** `package-id` or `hashi-object-id` in `[hashi-ids]` is wrong for a network other than Mainnet, so the node's first onchain read fails.
+**Likely cause:** `package-id` or `hashi-object-id` in `[hashi-ids]` is wrong for a network other than Mainnet, so the node's first onchain read fails. On the 1.0 releases, a missing `[hashi-ids]` section causes this on every network, Mainnet included.
 
 **Fix:** set both IDs from the [Networks](../reference/networks.mdx) table.
 

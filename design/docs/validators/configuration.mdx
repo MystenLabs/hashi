@@ -123,16 +123,16 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
-# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower, except on 1.0, where they get the full size)
 # grpc-max-decoding-message-size = 33554432
 
-# Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
+# Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200; on 1.0, one budget covers all of a peer's requests)
 # grpc-per-peer-inflight-limit = 200
 
-# Max in-flight gRPC request and response bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests)
+# Max in-flight gRPC request and response bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests) (not in the 1.0 releases)
 # grpc-per-peer-inflight-bytes = 67108874
 
-# Max live connections a peer's gRPC requests are served on (default: 4, minimum: 3)
+# Max live connections a peer's gRPC requests are served on (default: 4, minimum: 3) (not in the 1.0 releases)
 # grpc-per-peer-connection-limit = 4
 
 # Withdrawal batching delay in ms (default: 300000 = 5 min)
@@ -162,13 +162,13 @@ backup-dir = "/var/lib/hashi/backups"
 # Concurrency for leader job tasks, e.g. deposit processing (default: 32)
 # max-concurrent-leader-job-tasks = 32
 
-# Per-caller TRM call burst at each endpoint (default and minimum: 200)
+# Per-caller TRM call burst at each endpoint (default and minimum: 200) (not in the 1.0 releases)
 # trm-per-caller-burst = 200
 
-# Per-caller TRM calls regained per second at each endpoint (default: 1.0)
+# Per-caller TRM calls regained per second at each endpoint (default: 1.0) (not in the 1.0 releases)
 # trm-per-caller-refill-per-sec = 1.0
 
-# Milliseconds a TRM verdict is reused for the same addresses (default: 300000; 0 disables; max: 3600000)
+# Milliseconds a TRM verdict is reused for the same addresses (default: 300000; 0 disables; max: 3600000) (not in the 1.0 releases)
 # trm-verdict-reuse-ms = 300000
 
 # ── Nested tables ─────────────────────────────────────────────────────
@@ -189,7 +189,7 @@ UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 [metrics-push]
 push-url = "https://metrics-proxy.mainnet.sui.io:8443/publish/metrics"
 
-# Remote backups: uncomment ONE alternative.
+# Remote backups: uncomment ONE alternative. (not in the 1.0 releases)
 # S3 (region required):
 # [backup-remote]
 # destination = "s3://my-hashi-backups/"
@@ -274,16 +274,16 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
-# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower, except on 1.0, where they get the full size)
 # grpc-max-decoding-message-size = 33554432
 
-# Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
+# Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200; on 1.0, one budget covers all of a peer's requests)
 # grpc-per-peer-inflight-limit = 200
 
-# Max in-flight gRPC request and response bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests)
+# Max in-flight gRPC request and response bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests) (not in the 1.0 releases)
 # grpc-per-peer-inflight-bytes = 67108874
 
-# Max live connections a peer's gRPC requests are served on (default: 4, minimum: 3)
+# Max live connections a peer's gRPC requests are served on (default: 4, minimum: 3) (not in the 1.0 releases)
 # grpc-per-peer-connection-limit = 4
 
 # Withdrawal batching delay in ms (default: 300000 = 5 min)
@@ -331,7 +331,7 @@ UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 [metrics-push]
 push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 
-# Remote backups: uncomment ONE alternative.
+# Remote backups: uncomment ONE alternative. (not in the 1.0 releases)
 # S3 (region required):
 # [backup-remote]
 # destination = "s3://my-hashi-backups/"
@@ -344,6 +344,8 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 
 </TabItem>
 </Tabs>
+
+> **Settings not in the 1.0 releases.** `mainnet-1.0` and `testnet-1.0` reject the settings marked `(not in the 1.0 releases)` in the templates with an `unknown field` error. That applies to every command that reads the validator config: `hashi server` refuses to start, and `hashi register` and `hashi backup save` fail. A running node reads its config only at startup, so a marked key added to a live node's file fails at the next restart, or when a node restored from a backup holding that file starts. Leave these settings commented out until you run a release that has them.
 
 > **AML screening (TRM Labs).** `trm-api-key` is optional, but Mainnet operators should set one. Each operator screens with their own TRM account; [Sanctions](../sanctions.mdx#screening-with-trm-labs) explains how to create the key and what the node screens. Without a key the node logs `No TRM API key configured; AML screening is disabled` at startup and votes on deposits and withdrawals without screening them. TRM covers Mainnet only, so the key is ignored on Testnet.
 
