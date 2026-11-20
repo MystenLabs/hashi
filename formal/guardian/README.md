@@ -105,5 +105,6 @@ Lean models each such function as a pure function. The proof holds for each such
 ## When the Rust code changes
 
 Run `./review/extract.sh` and `lake build` again. If the change breaks a statement, the build fails.
-No CI job runs these commands at this time, so a person must run them.
+The CI job `Guardian Lean Proof` (`.github/workflows/guardian-proof.yml`) runs the same commands.
+It runs for a change to the Guardian crate, the types crate, or this folder.
 A change to a file in `review/` needs a new review of that file.
