@@ -123,7 +123,6 @@ impl MpcService for HttpService {
         let _abandon_on_drop = SetOnDrop(Arc::clone(&abandoned));
         let lock_run = self.mpc_read_run(requester).await;
         let mpc_manager = self.mpc_manager()?;
-        let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let store_reads = self.store_reads();
         let store_reads_shed = self.metrics().peer_store_reads_shed_total.clone();
         let stored_rows = self.metrics().stored_row_refusals();
@@ -166,22 +165,6 @@ impl MpcService for HttpService {
                     mgr.previous_epoch,
                     internal_request.epoch,
                 )?;
-                caller_membership::check_current_or_previous(
-                    &requester,
-                    internal_request.epoch,
-                    mgr.mpc_config.epoch,
-                    &mgr.committee,
-                    mgr.previous_committee.as_ref(),
-                )
-                .map_err(|refusal| {
-                    caller_membership::refuse(
-                        &refused,
-                        "retrieve_messages",
-                        &requester,
-                        &format!("epoch {}", internal_request.epoch),
-                        refusal,
-                    )
-                })?;
                 let outcome = mgr
                     .begin_retrieve(requester, &internal_request)
                     .map_err(to_status)?;
