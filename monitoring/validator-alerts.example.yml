@@ -6,19 +6,25 @@
 # your paging setup. Expressions assume your node's hashi metrics are
 # scraped into the local Prometheus without extra relabeling.
 
+# On mainnet-1.0 and testnet-1.0, the rules for the withdrawal bitcoind check,
+# signing while paused, MPC refusals, stored-row refusals, unguarded MPC work and
+# the TOB never fire, and the peer-shed rules work only partly: 1.0 does not export
+# their metrics. See docs/validator-alerts.md.
 groups:
   - name: hashi-validator-node-health
     rules:
       - alert: HashiBtcViewFrozen
-        expr: changes(hashi_kyoto_best_height[90m]) == 0
+        expr: changes(hashi_kyoto_best_height[3h]) == 0
         labels:
           severity: critical
         annotations:
           summary: "BTC view frozen"
           description: >-
-            hashi_kyoto_best_height has not changed in 90 minutes. Signet
-            ticks roughly every 10 minutes, so the node's Bitcoin view is
-            stuck (kyoto wedged, no peers, or bitcoind issue).
+            hashi_kyoto_best_height has not changed in 3 hours. Bitcoin
+            Mainnet and Signet both average a block every 10 minutes, and
+            Mainnet gaps over 90 minutes happen several times a year, so
+            3 hours of silence means the node's Bitcoin view is stuck
+            (kyoto wedged, no peers, or bitcoind issue).
 
       - alert: HashiBtcNotSynced
         expr: hashi_kyoto_synced == 0
@@ -64,15 +70,21 @@ groups:
             minutes. It has deadlocked or is stuck; check its logs.
 
       - alert: HashiReconfigNotTracking
-        expr: changes(hashi_epoch[3h]) == 0
+        expr: hashi_epoch < hashi_sui_epoch
+        for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "committee epoch not advancing"
+          summary: "committee epoch behind the Sui epoch"
           description: >-
-            Testnet reconfigures roughly every 40 minutes. Check the
-            operator channel first: if the fleet is reconfiguring and your
-            epoch is not moving, your node is stuck.
+            Hashi reconfigures at every Sui epoch change and normally
+            catches up within minutes. It also stays behind on purpose
+            before genesis and while governance holds reconfiguration
+            (hashi_reconfig_hold is 1). Otherwise check the operator
+            channel: if nothing is pending (hashi_reconfig_in_progress is
+            0), for example after a hold is cleared, run
+            `hashi committee start-reconfig`; if the fleet is reconfiguring
+            and your epoch is not moving, your node is stuck.
 
       - alert: HashiLowGas
         expr: hashi_sui_balance < 1e9
@@ -129,6 +141,22 @@ groups:
             until operators coordinate a fix. Honest nodes never trigger this.
             Never add a complaint-response-policy entry on your own: one wrong
             entry can leak your shares.
+
+      - alert: HashiNonceBatchSkipped
+        expr: |
+          (increase(hashi_mpc_nonce_local_skip_batches_total[1h]) > 0)
+          or (hashi_mpc_nonce_local_skip_batches_total > 0
+            and ignoring (version, sui_chain_id, bitcoin_chain_id, package_id, hashi_object_id) uptime < 3600
+            and timestamp(hashi_mpc_nonce_local_skip_batches_total) >= max without (version, sui_chain_id, bitcoin_chain_id, package_id, hashi_object_id) (timestamp(uptime) - uptime))
+        labels:
+          severity: warning
+        annotations:
+          summary: "discarded a nonce batch it could not build like its peers"
+          description: >-
+            This node skipped a dealer and threw the nonce batch away.
+            This can delay signing. If the alert keeps firing, fix
+            HashiSuiMirrorStale if that fires too, otherwise tell the operator
+            channel.
 
       - alert: HashiWithdrawalFailsBitcoinScripts
         expr: increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0

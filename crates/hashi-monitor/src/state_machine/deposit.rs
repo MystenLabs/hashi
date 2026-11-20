@@ -24,6 +24,7 @@ use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::UtxoOrigin;
 use crate::findings::DepositMismatchReason;
+use crate::findings::DepositUnbackedReason;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::timing::Timing;
@@ -268,7 +269,10 @@ impl DepositStateMachine {
         if self.empty_lookups_since_approval < EMPTY_LOOKUPS_BEFORE_ALERT {
             return Vec::new();
         }
-        vec![MonitorFinding::DepositUnbacked { sui: sui.clone() }]
+        vec![MonitorFinding::DepositUnbacked {
+            sui: sui.clone(),
+            reason: DepositUnbackedReason::NotFound,
+        }]
     }
 
     /// Bitcoin's confirmation of the transaction, read against the claim.
@@ -345,7 +349,10 @@ mod tests {
 
         assert_eq!(
             sm.record_lookup(&Timing::for_tests(), 100 + 1_000, None),
-            vec![MonitorFinding::DepositUnbacked { sui: approval() }]
+            vec![MonitorFinding::DepositUnbacked {
+                sui: approval(),
+                reason: DepositUnbackedReason::NotFound
+            }]
         );
     }
 
@@ -445,7 +452,10 @@ mod tests {
 
         // The first may race the committee's view of Bitcoin.
         assert!(sm.record_lookup(&Timing::for_tests(), 300, None).is_empty());
-        let unbacked = vec![MonitorFinding::DepositUnbacked { sui: approval() }];
+        let unbacked = vec![MonitorFinding::DepositUnbacked {
+            sui: approval(),
+            reason: DepositUnbackedReason::NotFound,
+        }];
         assert_eq!(sm.record_lookup(&Timing::for_tests(), 400, None), unbacked);
         assert_eq!(sm.record_lookup(&Timing::for_tests(), 500, None), unbacked);
 

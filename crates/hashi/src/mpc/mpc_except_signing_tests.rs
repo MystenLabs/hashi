@@ -13121,6 +13121,43 @@ fn a_padded_accuser_ciphertext_is_answered_only_with_a_valid_proof() {
 }
 
 #[test]
+fn a_padded_accuser_ciphertext_is_not_answered_from_another_dealings_output() {
+    let fixture = PaddedComplaintFixture::dkg();
+    let mut responder = fixture.responder_with(pad_ciphertext(&fixture.honest, PADDED_ACCUSER));
+    let Ok(ComplaintResponse::Dkg(answered)) =
+        fixture.complain(&mut responder, &fixture.valid_complaint)
+    else {
+        panic!("expected a DKG complaint response");
+    };
+    let position = fixture
+        .rotation_setup
+        .dealer_indices
+        .iter()
+        .position(|&idx| idx == PADDED_DEPARTING)
+        .unwrap();
+    let Messages::Dkg(other_dealing) = &fixture.rotation_setup.dealer_messages[position] else {
+        panic!("expected a DKG message");
+    };
+    let other: PaddableAvssMessage =
+        bcs::from_bytes(&bcs::to_bytes(other_dealing).unwrap()).unwrap();
+    responder.dealer_outputs.insert(
+        DealerOutputsKey::Dkg(fixture.dealer),
+        avss::AvssOutput {
+            feldman_commitment: other.feldman_commitment,
+            my_shares: answered.shares,
+        },
+    );
+    let result = fixture.complain(&mut responder, &fixture.valid_complaint);
+    assert!(
+        matches!(
+            &result,
+            Err(MpcError::CryptoError(reason)) if reason == WRONG_LENGTH_OUTPUT_FOR_ANOTHER_DEALING
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn an_honest_accuser_ciphertext_keeps_todays_complaint_check() {
     for fixture in [
         PaddedComplaintFixture::rotation(),
@@ -20376,6 +20413,11 @@ fn send_messages_count_checks_before_the_manager_lock() {
     let mut miscounted = undecodable.clone();
     miscounted[encs_count] += 1;
     miscounted.insert(miscounted.len() - 96, 0);
+    let paddable: PaddableAvssMessage = bcs::from_bytes(&honest).unwrap();
+    let honest_len = paddable.encs[2].len();
+    let padded = bcs::to_bytes(&pad_ciphertext(&bcs::from_bytes(&honest).unwrap(), 2)).unwrap();
+    stored_rows::check_dkg_message(&manager.shape_params(), epoch, &setup.address(1), &padded)
+        .unwrap();
 
     let tmpdir = tempfile::Builder::new().tempdir().unwrap();
     let mut config = crate::config::Config::new_for_testing();
@@ -20407,20 +20449,20 @@ fn send_messages_count_checks_before_the_manager_lock() {
     };
 
     let held = mpc_lock.write().unwrap();
-    let refusals = [miscounted, undecodable].map(|message| {
+    let refusals = [miscounted, undecodable, padded].map(|message| {
         let handler = send(message);
         rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), handler).await })
     });
     drop(held);
-    let [miscounted, undecodable] = refusals.map(|refused| {
+    let [miscounted, undecodable, padded] = refusals.map(|refused| {
         refused
             .expect("the refusal waited for the manager lock")
             .unwrap()
             .unwrap_err()
     });
     assert_eq!(
-        (miscounted.code(), undecodable.code()),
-        (tonic::Code::InvalidArgument, tonic::Code::InvalidArgument)
+        [miscounted.code(), undecodable.code(), padded.code()],
+        [tonic::Code::InvalidArgument; 3]
     );
     assert!(
         miscounted.message().contains("ciphertext.encs"),
@@ -20432,13 +20474,21 @@ fn send_messages_count_checks_before_the_manager_lock() {
         "{}",
         undecodable.message()
     );
+    assert!(
+        padded.message().contains(&format!(
+            "ciphertext.encs: {} bytes, expected {honest_len}",
+            honest_len + 1
+        )),
+        "{}",
+        padded.message()
+    );
     let sender = setup.address(1).to_string();
     assert_eq!(
         metrics
             .mpc_peer_refusals_total
             .with_label_values(&[&sender, "request"])
             .get(),
-        1
+        3
     );
     assert!(
         metrics
@@ -20448,15 +20498,101 @@ fn send_messages_count_checks_before_the_manager_lock() {
             > 0
     );
     assert_eq!(
-        metrics
+        ["count", "decode"].map(|reason| metrics
             .mpc_refusals_total
-            .with_label_values(&["request", "send_messages", "dkg", "count"])
-            .get(),
-        1
+            .with_label_values(&["request", "send_messages", "dkg", reason])
+            .get()),
+        [2, 1]
     );
 
     let accepted = rt.block_on(send(honest)).unwrap();
     assert!(accepted.is_ok(), "{accepted:?}");
+
+    let callers = [setup.address(1), Address::new([0xee; 32])];
+    let refused = callers.map(|caller| {
+        let mut empty = tonic::Request::new(proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: None,
+        });
+        empty.extensions_mut().insert(caller);
+        rt.block_on(async {
+            use proto::mpc_service_server::MpcService;
+            service.send_messages(empty).await
+        })
+        .unwrap_err()
+        .code()
+    });
+    assert_eq!(refused, [tonic::Code::InvalidArgument; 2]);
+    assert_eq!(
+        callers.map(|caller| metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&caller.to_string(), "request"])
+            .get()),
+        [4, 0]
+    );
+}
+
+#[test]
+fn send_messages_with_no_payload_counts_a_departing_rotation_dealer_and_not_an_outsider() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut rotation_setup = RotationTestSetup::new();
+    let (receiver, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let store = Arc::clone(&receiver.public_messages_store);
+    let departing_idx = 4;
+    let epoch = rotation_setup.shrink_to_next_epoch(departing_idx);
+    let manager = rotation_setup.rotation_manager_at_target(0, dkg_output, store);
+    let callers = [
+        rotation_setup.setup.address(departing_idx),
+        Address::new([0xee; 32]),
+    ];
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let metrics = hashi.metrics.clone();
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let refused = callers.map(|caller| {
+        let mut empty = tonic::Request::new(proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: None,
+        });
+        empty.extensions_mut().insert(caller);
+        rt.block_on(async {
+            use proto::mpc_service_server::MpcService;
+            service.send_messages(empty).await
+        })
+        .unwrap_err()
+        .code()
+    });
+    assert_eq!(refused, [tonic::Code::InvalidArgument; 2]);
+    assert_eq!(
+        callers.map(|caller| metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&caller.to_string(), "request"])
+            .get()),
+        [1, 0]
+    );
+    assert_eq!(
+        metrics
+            .mpc_refusals_total
+            .with_label_values(&["request", "send_messages", "unspecified", "decode"])
+            .get(),
+        1
+    );
 }
 
 #[test]
@@ -20581,11 +20717,21 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
         .build()
         .unwrap();
 
-    let rotation_setup = RotationTestSetup::new();
+    let mut rotation_setup = RotationTestSetup::new();
     let dealer = rotation_setup.setup.address(0);
-    let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
-    let (mut receiver, dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
-    receiver.set_previous_output(dkg_output);
+    let completed_dkg = |index| {
+        let (manager, output) = rotation_setup.create_receiver_with_memory_store(index);
+        (output, Arc::clone(&manager.public_messages_store))
+    };
+    let (dealer_output, dealer_store) = completed_dkg(0);
+    let (receiver_output, receiver_store) = completed_dkg(2);
+    rotation_setup.shrink_to_next_epoch(3);
+    let messages = Messages::Rotation(
+        rotation_setup
+            .rotation_manager_at_target(0, dealer_output.clone(), dealer_store)
+            .create_rotation_messages(&dealer_output, &mut rand::thread_rng()),
+    );
+    let receiver = rotation_setup.rotation_manager_at_target(2, receiver_output, receiver_store);
     let epoch = receiver.mpc_config.epoch;
     let Some(proto::send_messages_request::Messages::RotationMessages(honest)) =
         SendMessagesRequest { messages }.to_proto(epoch).messages
@@ -20599,6 +20745,13 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     duplicated.last_mut().unwrap().0 = honest[0].0;
     let mut oversized = honest.clone();
     oversized.push((u16::MAX.into(), honest[0].1.clone()));
+    let entry = honest[0].1.value.as_deref().unwrap();
+    let paddable: PaddableAvssMessage = bcs::from_bytes(entry).unwrap();
+    let honest_len = paddable.encs[1].len();
+    let mut padded = honest.clone();
+    padded[0].1 = bcs::to_bytes(&pad_ciphertext(&bcs::from_bytes(entry).unwrap(), 1))
+        .unwrap()
+        .into();
 
     let tmpdir = tempfile::Builder::new().tempdir().unwrap();
     let mut config = crate::config::Config::new_for_testing();
@@ -20635,18 +20788,28 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     for (entries, reason) in [
         (
             unowned_first,
-            "share index 65535 is zero or not owned by the dealer".to_string(),
+            "rotation_messages: share index 65535 is zero or not owned by the dealer".to_string(),
         ),
         (
             duplicated,
-            format!("share index {} appears more than once", honest[0].0),
+            format!(
+                "rotation_messages: share index {} appears more than once",
+                honest[0].0
+            ),
         ),
         (
             oversized,
             format!(
-                "{} entries, at most {} allowed",
+                "rotation_messages: {} entries, at most {} allowed",
                 honest.len() + 1,
                 honest.len()
+            ),
+        ),
+        (
+            padded,
+            format!(
+                "ciphertext.encs: {} bytes, expected {honest_len}",
+                honest_len + 1
             ),
         ),
     ] {
@@ -20660,7 +20823,7 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
         assert!(
             refused
                 .message()
-                .contains(&format!("count check: rotation_messages: {reason}")),
+                .contains(&format!("count check: {reason}")),
             "{}",
             refused.message()
         );

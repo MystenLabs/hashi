@@ -22,12 +22,13 @@
 //!    stops the monitor.
 //! 2. Before a pass, `synced_height` checks the node and returns its height.
 //!    The node must follow `deployment.bitcoin_network`, be out of initial
-//!    block download, and have a tip no older than `max_tip_age`, which the
-//!    auditor sets to its `SOURCE_STALE_LIMIT`. At the first check, a node
-//!    that reports its indexes must have a synced `txindex`. A failed check
-//!    fails the pass, so a wrong node, or one with an older tip, becomes a
-//!    `SourceStale` finding. Until its tip passes that age, a frozen node
-//!    still gives lookup findings.
+//!    block download, have a tip no older than `max_tip_age`, which the
+//!    auditor sets to its `SOURCE_STALE_LIMIT`, and have an outbound peer.
+//!    Inbound clients may only download blocks, so they do not establish
+//!    connectivity to the Bitcoin network. Regtest skips this check. At the
+//!    first check, a node that reports its indexes must have a synced
+//!    `txindex`. A failed check fails the pass, so a wrong node, or one
+//!    with an older tip or no outbound peers, becomes a `SourceStale` finding.
 //!    All batches use this height to calculate confirmation depth.
 //!    Blocks that arrive during the pass count on the next pass.
 //! 3. `prefetch_confirmations` looks all pending txids up in batches of
@@ -124,12 +125,17 @@ pub enum OutpointState {
     Missing,
     /// The output exists, and a transaction in a block, at any depth, has
     /// spent it. With `include_mempool`, a mempool transaction also counts.
-    Spent,
+    Spent {
+        /// The output, so a caller can check what it paid.
+        output: TxOut,
+    },
     /// The output exists and is in the UTXO set. Without `include_mempool`,
     /// a mempool spend does not change this.
     Unspent {
         /// The time of the block that holds the output.
         block_time: UnixSeconds,
+        /// The output, so a caller can check what it pays.
+        output: TxOut,
     },
 }
 
@@ -320,11 +326,39 @@ impl BtcRpcClient {
         )
         .context("failed to parse bitcoin blockchain info")?;
         info.ensure_synced(self.network, self.max_tip_age, now_timestamp_secs())?;
+        if self.network != Network::Regtest {
+            self.ensure_peers()?;
+        }
         if !self.txindex_checked.get() {
             self.check_txindex()?;
             self.txindex_checked.set(true);
         }
         Ok(info.blocks)
+    }
+
+    /// Fail unless the node has an outbound peer. See the module doc.
+    fn ensure_peers(&self) -> anyhow::Result<()> {
+        let response = self
+            .transport
+            .call("getnetworkinfo", serde_json::json!([]))?;
+        if let Some(error) = response.error {
+            anyhow::bail!(
+                "bitcoin getnetworkinfo failed: {} ({})",
+                error.message,
+                error.code
+            );
+        }
+        let connections_out = response
+            .result
+            .as_ref()
+            .and_then(|info| info.get("connections_out"))
+            .and_then(Value::as_u64)
+            .context("bitcoin getnetworkinfo has no connections_out")?;
+        anyhow::ensure!(
+            connections_out > 0,
+            "bitcoind has no outbound peers, so its tip may be stale"
+        );
+        Ok(())
     }
 
     /// Fail unless the node has a synced `txindex`. A node that does not
@@ -449,7 +483,11 @@ impl BtcRpcClient {
                 .with_context(|| format!("missing bitcoin lookup result for {}", outpoint.txid))?;
             match confirmation {
                 Some(confirmation) if (outpoint.vout as usize) < confirmation.outputs.len() => {
-                    existing.push((*outpoint, confirmation.block_time));
+                    existing.push((
+                        *outpoint,
+                        confirmation.block_time,
+                        confirmation.outputs[outpoint.vout as usize].clone(),
+                    ));
                 }
                 _ => {
                     states.insert(*outpoint, OutpointState::Missing);
@@ -459,15 +497,15 @@ impl BtcRpcClient {
 
         let existing_outpoints = existing
             .iter()
-            .map(|(outpoint, _)| *outpoint)
+            .map(|(outpoint, _, _)| *outpoint)
             .collect::<Vec<_>>();
         let unspent = self
             .transport
             .lookup_unspent(&existing_outpoints, include_mempool)?;
-        for (outpoint, block_time) in existing {
+        for (outpoint, block_time, output) in existing {
             let state = match unspent.get(&outpoint) {
-                Some(true) => OutpointState::Unspent { block_time },
-                Some(false) => OutpointState::Spent,
+                Some(true) => OutpointState::Unspent { block_time, output },
+                Some(false) => OutpointState::Spent { output },
                 None => anyhow::bail!("missing bitcoin gettxout result for {outpoint}"),
             };
             states.insert(outpoint, state);
@@ -982,6 +1020,7 @@ mod tests {
         let mut cfg = Config::for_tests();
         cfg.btc = BtcConfig {
             rpc_url,
+            reference_api_url: cfg.btc.reference_api_url.clone(),
             http_headers: BTreeMap::from([(
                 "Authorization".to_string(),
                 format!(
@@ -1142,7 +1181,8 @@ mod tests {
         assert_eq!(
             states[&outpoint],
             OutpointState::Unspent {
-                block_time: paid.block_time
+                block_time: paid.block_time,
+                output: paid.outputs[vout as usize].clone(),
             }
         );
         assert_eq!(states[&out_of_range], OutpointState::Missing);
@@ -1158,10 +1198,10 @@ mod tests {
 
         // The spend is only in the mempool.
         assert!(matches!(lookup(false)?, OutpointState::Unspent { .. }));
-        assert_eq!(lookup(true)?, OutpointState::Spent);
+        assert!(matches!(lookup(true)?, OutpointState::Spent { .. }));
 
         node.generate_blocks(MAINNET_MIN_CONFIRMATIONS)?;
-        assert_eq!(lookup(false)?, OutpointState::Spent);
+        assert!(matches!(lookup(false)?, OutpointState::Spent { .. }));
 
         Ok(())
     }
@@ -1349,6 +1389,17 @@ mod tests {
         );
         client.check_txindex().unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_node_with_only_inbound_peers_is_not_synced() {
+        let (client, server) = client_answered_by(
+            "HTTP/1.1 200 OK\r\nContent-Length: 68\r\n\r\n\
+             {\"result\":{\"connections\":2,\"connections_out\":0},\"error\":null,\"id\":1}",
+        );
+        let error = client.ensure_peers().unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("no outbound peers"), "{error}");
     }
 
     #[test]

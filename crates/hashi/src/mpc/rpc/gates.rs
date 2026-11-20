@@ -3,7 +3,6 @@
 
 use super::caller_membership::Refusal;
 use crate::mpc::count_check;
-use crate::mpc::count_check::AvssShape;
 use crate::mpc::count_check::CountCheckError;
 use crate::mpc::shape_params::CommitteeShape;
 use crate::mpc::shape_params::ShapeParams;
@@ -39,21 +38,29 @@ pub(super) fn check_send_messages(
             member_party(current, sender, "Dealer")?;
             count_checked(
                 sender,
-                count_check::check_avss_message(bytes(message), current.avss_shape()),
+                count_check::check_exact_avss_message(
+                    bytes(message),
+                    current.threshold(),
+                    current.weights(),
+                ),
             )
         }
         Some(Messages::RotationMessages(rotation)) => {
             reject_kind_mismatch(shape, sender, ProtocolType::KeyRotation)?;
             let owned = rotation_shares_of(shape, sender)?;
-            count_checked(
-                sender,
-                check_rotation_map(rotation, &owned, current.avss_shape()),
-            )
+            count_checked(sender, check_rotation_map(rotation, &owned, current))
         }
         Some(Messages::AvidNonceMessage(avid)) => {
             check_avid_nonce_message(shape, sender, holder, avid)
         }
-        None => Ok(()),
+        None => member_party(current, sender, "Sender")
+            .map(drop)
+            .or_else(|not_member| {
+                reject_kind_mismatch(shape, sender, ProtocolType::KeyRotation)
+                    .and_then(|()| rotation_shares_of(shape, sender))
+                    .map(drop)
+                    .map_err(|_| not_member)
+            }),
     }
 }
 
@@ -196,7 +203,7 @@ fn rotation_shares_of(shape: &ShapeParams, dealer: Address) -> MpcResult<Vec<Sha
 fn check_rotation_map(
     rotation: &proto::RotationMessages,
     owned: &[ShareIndex],
-    shape: AvssShape,
+    current: &CommitteeShape,
 ) -> Result<(), CountCheckError> {
     const FIELD: &str = "rotation_messages";
     (rotation.len() <= owned.len())
@@ -226,7 +233,11 @@ fn check_rotation_map(
                 field: FIELD,
                 index,
             })?;
-        count_check::check_avss_message(bytes(&message), shape)
+        count_check::check_exact_avss_message(
+            bytes(&message),
+            current.threshold(),
+            current.weights(),
+        )
     })
 }
 
