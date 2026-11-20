@@ -2,8 +2,6 @@
 
 Formal verification of the Hashi package (`packages/hashi`) with the Certora Sui Prover. The specs are CVLM (Move). They check the on-chain deposit, withdrawal, solvency, proposal, and reconfiguration logic.
 
-The mathematical statements behind these rules are in [docs/PROPERTIES.md](docs/PROPERTIES.md).
-
 ## Folder structure
 
 ```
@@ -12,7 +10,6 @@ certora/
 │                   # plus one conf per property.
 ├── specs/          # CVLM spec packages: deposit, withdraw, proposal, solvency
 ├── patches/        # Visibility patches applied to packages/hashi before a run
-├── docs/           # Property write-ups
 └── README.md
 ```
 
