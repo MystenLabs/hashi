@@ -1,0 +1,20 @@
+name = "guardian-proof"
+defaultTargets = ["Review", "NoReview"]
+
+[[require]]
+name = "aeneas"
+git = "https://github.com/AeneasVerif/aeneas"
+rev = "nightly-2026.11.19-8f4466d"
+subDir = "backends/lean"
+
+# The statements. A person reviews this folder.
+[[lean_lib]]
+name = "Review"
+srcDir = "review"
+roots = ["WithdrawalSpec"]
+
+# The generated code and the proofs. Lean checks this folder.
+[[lean_lib]]
+name = "NoReview"
+srcDir = "no-review"
+roots = ["HashiGuardian"]

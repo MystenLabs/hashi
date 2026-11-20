@@ -1,0 +1,4 @@
+# Aeneas generates this file. Run `./review/extract.sh` to make it.
+/no-review/HashiGuardian.lean
+# Lean build output and downloaded libraries.
+/.lake/

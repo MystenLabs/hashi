@@ -391,10 +391,10 @@ impl EnclaveState {
         timestamp: u64,
         amount_sats: u64,
     ) -> GuardianResult<LimiterState> {
-        let limiter = self
-            .rate_limiter
-            .as_mut()
-            .ok_or_else(|| InternalError("rate limiter not initialized".into()))?;
+        // Aeneas has no model for `as_mut` with `ok_or_else`. This form is equivalent.
+        let Some(limiter) = &mut self.rate_limiter else {
+            return Err(InternalError("rate limiter not initialized".into()));
+        };
         limiter.consume(seq, timestamp, amount_sats)?;
         Ok(*limiter.state())
     }

@@ -440,6 +440,22 @@ pub struct CommitteeSignature {
 }
 
 impl CommitteeSignature {
+    /// Parse a committee signature from its wire parts.
+    fn from_bytes(
+        epoch: u64,
+        signature_bytes: &[u8],
+        signers_bitmap_bytes: &[u8],
+    ) -> Result<Self, SignatureError> {
+        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
+            .map_err(SignatureError::from_source)?;
+        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
+        Ok(Self {
+            epoch,
+            signature,
+            signers_bitmap,
+        })
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -579,18 +595,9 @@ impl<T: IntentMessage> SignedMessage<T> {
         signature_bytes: &[u8],
         signers_bitmap_bytes: &[u8],
     ) -> Result<Self, SignatureError> {
-        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
-            .map_err(SignatureError::from_source)?;
-        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
-        let committee_signature = CommitteeSignature {
-            epoch,
-            signature,
-            signers_bitmap,
-        };
-        Ok(SignedMessage {
-            signature: committee_signature,
-            message,
-        })
+        let signature =
+            CommitteeSignature::from_bytes(epoch, signature_bytes, signers_bitmap_bytes)?;
+        Ok(SignedMessage { signature, message })
     }
 
     pub fn try_from_parts(
@@ -602,18 +609,7 @@ impl<T: IntentMessage> SignedMessage<T> {
         committee: &Committee,
         threshold: u64,
     ) -> Result<Self, SignatureError> {
-        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
-            .map_err(SignatureError::from_source)?;
-        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
-        let committee_signature = CommitteeSignature {
-            epoch,
-            signature,
-            signers_bitmap,
-        };
-        let signed_message = SignedMessage {
-            signature: committee_signature,
-            message,
-        };
+        let signed_message = Self::new(epoch, message, signature_bytes, signers_bitmap_bytes)?;
         committee.verify_signature_and_weight(hashi_id, &signed_message, threshold)?;
         Ok(signed_message)
     }
