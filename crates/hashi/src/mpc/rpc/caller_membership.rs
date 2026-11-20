@@ -33,24 +33,6 @@ pub(super) fn check_member(committee: &RuntimeCommittee, caller: &Address) -> Re
         .ok_or(Refusal::NotMember)
 }
 
-pub(super) fn check_current_or_previous(
-    caller: &Address,
-    request_epoch: u64,
-    current_epoch: u64,
-    current: &RuntimeCommittee,
-    previous: Option<&RuntimeCommittee>,
-) -> Result<(), Refusal> {
-    let committee = if request_epoch == current_epoch {
-        current
-    } else {
-        let Some(previous) = previous else {
-            return Ok(());
-        };
-        previous
-    };
-    check_member(committee, caller)
-}
-
 pub(super) fn check_epoch_or_successor(
     committees: &BTreeMap<u64, RuntimeCommittee>,
     epoch: u64,
@@ -137,7 +119,6 @@ mod tests {
         ]);
         let before_pending = BTreeMap::from([(10, committee(10, &[1])), (20, committee(20, &[2]))]);
         let current = committee(20, &[2]);
-        let previous = committee(10, &[1]);
         let cases = [
             (
                 check_epoch_or_successor(&committees, 10, &address(1)),
@@ -171,26 +152,6 @@ mod tests {
             (
                 check_epoch(&committees, 25, &address(2)),
                 Err(Refusal::CommitteeUnknown),
-            ),
-            (
-                check_current_or_previous(&address(2), 20, 20, &current, Some(&previous)),
-                Ok(()),
-            ),
-            (
-                check_current_or_previous(&address(1), 20, 20, &current, Some(&previous)),
-                Err(Refusal::NotMember),
-            ),
-            (
-                check_current_or_previous(&address(1), 10, 20, &current, Some(&previous)),
-                Ok(()),
-            ),
-            (
-                check_current_or_previous(&address(2), 10, 20, &current, Some(&previous)),
-                Err(Refusal::NotMember),
-            ),
-            (
-                check_current_or_previous(&address(9), 10, 20, &current, None),
-                Ok(()),
             ),
             (check_member(&current, &address(2)), Ok(())),
             (check_member(&current, &address(1)), Err(Refusal::NotMember)),

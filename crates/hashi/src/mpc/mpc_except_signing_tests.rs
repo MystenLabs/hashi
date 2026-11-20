@@ -20037,6 +20037,70 @@ fn retrieve_messages_store_read_does_not_hold_the_manager_lock() {
 }
 
 #[test]
+fn a_non_members_retrieval_is_refused_without_waiting_for_the_mpc_lock() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let manager = setup.create_manager(0);
+    let epoch = manager.mpc_config.epoch;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let refused = hashi.metrics.mpc_rpc_caller_refused_total.clone();
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let outsider = Address::new([0xee; 32]);
+    let retrieve = |epoch: u64| {
+        let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
+            epoch: Some(epoch),
+            dealer: Some(setup.address(2).to_string()),
+            protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
+            batch_index: None,
+        });
+        request.extensions_mut().insert(outsider);
+        let service = service.clone();
+        rt.block_on(async move {
+            use proto::mpc_service_server::MpcService;
+            tokio::time::timeout(Duration::from_secs(5), service.retrieve_messages(request)).await
+        })
+    };
+
+    let held = mpc_lock.write().unwrap();
+    let not_member = retrieve(epoch);
+    let unknown_epoch = retrieve(epoch + 1);
+    drop(held);
+
+    let not_member = not_member
+        .expect("the membership refusal waited for the MPC lock")
+        .unwrap_err();
+    assert_eq!(not_member.code(), tonic::Code::PermissionDenied);
+    let unknown_epoch = unknown_epoch
+        .expect("the epoch refusal waited for the MPC lock")
+        .unwrap_err();
+    assert_eq!(unknown_epoch.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        refused
+            .with_label_values(&["retrieve_messages", &outsider.to_string(), "not_member"])
+            .get(),
+        1
+    );
+}
+
+#[test]
 fn a_requester_over_its_store_read_permits_is_shed_and_others_are_admitted() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

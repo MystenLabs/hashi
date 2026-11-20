@@ -118,11 +118,11 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        check_retrieve_caller(self, &requester, internal_request.epoch)?;
         let abandoned = Arc::new(AtomicBool::new(false));
         let _abandon_on_drop = SetOnDrop(Arc::clone(&abandoned));
         let lock_run = self.mpc_read_run(requester).await;
         let mpc_manager = self.mpc_manager()?;
-        let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let store_reads = self.store_reads();
         let store_reads_shed = self.metrics().peer_store_reads_shed_total.clone();
         let stored_rows = self.metrics().stored_row_refusals();
@@ -165,22 +165,6 @@ impl MpcService for HttpService {
                     mgr.previous_epoch,
                     internal_request.epoch,
                 )?;
-                caller_membership::check_current_or_previous(
-                    &requester,
-                    internal_request.epoch,
-                    mgr.mpc_config.epoch,
-                    &mgr.committee,
-                    mgr.previous_committee.as_ref(),
-                )
-                .map_err(|refusal| {
-                    caller_membership::refuse(
-                        &refused,
-                        "retrieve_messages",
-                        &requester,
-                        &format!("epoch {}", internal_request.epoch),
-                        refusal,
-                    )
-                })?;
                 let outcome = mgr
                     .begin_retrieve(requester, &internal_request)
                     .map_err(to_status)?;
@@ -404,6 +388,32 @@ fn authenticate_caller<T>(request: &tonic::Request<T>) -> Result<Address, Status
         .get::<Address>()
         .copied()
         .ok_or_else(|| Status::permission_denied("unknown validator"))
+}
+
+fn check_retrieve_caller(
+    service: &HttpService,
+    caller: &Address,
+    epoch: u64,
+) -> Result<(), Status> {
+    let shape = service.shape_params()?;
+    validate_epoch_current_or_previous(shape.epoch(), shape.previous_epoch(), epoch)?;
+    shape
+        .committee_for_epoch(epoch)
+        .map_or(Ok(()), |committee| {
+            committee
+                .party_of(caller)
+                .map(drop)
+                .ok_or(caller_membership::Refusal::NotMember)
+        })
+        .map_err(|refusal| {
+            caller_membership::refuse(
+                &service.metrics().mpc_rpc_caller_refused_total,
+                "retrieve_messages",
+                caller,
+                &format!("epoch {epoch}"),
+                refusal,
+            )
+        })
 }
 
 fn check_caller_in_epoch(
