@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REQUIRED"],"fn":["read","read_json","require_programs"],"struct":["Cmd","Output","System"],"trait":["Exec"]};

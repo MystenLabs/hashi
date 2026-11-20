@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["treasury_cap_field_id"]};

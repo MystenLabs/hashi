@@ -1,0 +1,412 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/hashi-guardian-ops/src/github.rs`."><title>github.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="hashi_guardian_ops" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">hashi_guardian_ops/</div>github.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright (c) Mysten Labs, Inc.
+<a href=#2 id=2 data-nosnippet>2</a>// SPDX-License-Identifier: Apache-2.0
+<a href=#3 id=3 data-nosnippet>3</a>
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="doccomment">//! GitHub Actions runs: the guardian's PCR0 measurement, which must come from two independent runners, and the proxy
+<a href=#5 id=5 data-nosnippet>5</a>//! image build.
+<a href=#6 id=6 data-nosnippet>6</a>
+<a href=#7 id=7 data-nosnippet>7</a></span><span class="kw">use </span><a href="https://doc.rust-lang.org/1.96.1/alloc/collections/btree/set/struct.BTreeSet.html">std::collections::BTreeSet</a>;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span><a href="https://doc.rust-lang.org/1.96.1/alloc/fmt/index.html">std::fmt</a>;
+<a href=#9 id=9 data-nosnippet>9</a>
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span><a href="https://docs.rs/anyhow/1.0.102/anyhow/trait.Context.html">anyhow::Context</a>;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span><a href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">anyhow::Result</a>;
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">anyhow::bail</a>;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span><a href="https://docs.rs/serde_derive/1.0.228/serde_derive/derive.Deserialize.html">serde::Deserialize</a>;
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span><a href="lib.rs.html#35-41"><span class="kw">crate</span>::Ctx</a>;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span><a href="exec.rs.html#35-41"><span class="kw">crate</span>::exec::Cmd</a>;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span><a href="exec.rs.html#200-208"><span class="kw">crate</span>::exec::read</a>;
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span><a href="exec.rs.html#211-219"><span class="kw">crate</span>::exec::read_json</a>;
+<a href=#19 id=19 data-nosnippet>19</a>
+<a href=#20 id=20 data-nosnippet>20</a><span class="doccomment">/// A workflow file of a GitHub repository, or with a trailing `*`, every workflow file its name prefixes.
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="attr">#[derive(<a href="https://doc.rust-lang.org/1.96.1/core/fmt/macros/derive.Debug.html">Debug</a>, <a href="https://doc.rust-lang.org/1.96.1/core/cmp/derive.PartialEq.html">PartialEq</a>, <a href="https://doc.rust-lang.org/1.96.1/core/cmp/derive.Eq.html">Eq</a>)]
+<a href=#22 id=22 data-nosnippet>22</a></span><span class="kw">pub struct </span><a href="#22-25">Workflow</a> {
+<a href=#23 id=23 data-nosnippet>23</a>    <span class="kw">pub </span>repo: <a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>,
+<a href=#24 id=24 data-nosnippet>24</a>    <span class="kw">pub </span>file: <a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>,
+<a href=#25 id=25 data-nosnippet>25</a>}
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">impl </span><a href="#22-25">Workflow</a> {
+<a href=#28 id=28 data-nosnippet>28</a>    <span class="doccomment">/// Reads `&lt;owner&gt;/&lt;repo&gt;/.github/workflows/&lt;file&gt;`, as a `uses:` line names a workflow, and the `@&lt;ref&gt;` after it.
+<a href=#29 id=29 data-nosnippet>29</a>    </span><span class="kw">fn </span>parse(text: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>) -&gt; <a class="prelude-ty" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html">Option</a>&lt;(<span class="self">Self</span>, <a class="prelude-ty" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html">Option</a>&lt;<span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>&gt;)&gt; {
+<a href=#30 id=30 data-nosnippet>30</a>        <span class="kw">let </span>(path, git_ref) = <span class="kw">match </span><a href="#29">text</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.split_once">split_once</a>(<span class="string">'@'</span>) {
+<a href=#31 id=31 data-nosnippet>31</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.Some">Some</a>((path, git_ref)) =&gt; (<a href="#31">path</a>, <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.Some">Some</a>(<a href="#31">git_ref</a>)),
+<a href=#32 id=32 data-nosnippet>32</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.None">None</a> =&gt; (<a href="#29">text</a>, <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.None">None</a>),
+<a href=#33 id=33 data-nosnippet>33</a>        };
+<a href=#34 id=34 data-nosnippet>34</a>        <span class="kw">let </span>(owner, rest) = <a href="#30">path</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.split_once">split_once</a>(<span class="string">'/'</span>)<span class="question-mark">?</span>;
+<a href=#35 id=35 data-nosnippet>35</a>        <span class="kw">let </span>(repo, rest) = <a href="#34">rest</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.split_once">split_once</a>(<span class="string">'/'</span>)<span class="question-mark">?</span>;
+<a href=#36 id=36 data-nosnippet>36</a>        <span class="kw">let </span>file = <a href="#35">rest</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.strip_prefix">strip_prefix</a>(<span class="string">".github/workflows/"</span>)<span class="question-mark">?</span>;
+<a href=#37 id=37 data-nosnippet>37</a>        <span class="kw">let </span>named = |part: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>| {
+<a href=#38 id=38 data-nosnippet>38</a>            !<a href="#37">part</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.is_empty">is_empty</a>()
+<a href=#39 id=39 data-nosnippet>39</a>                &amp;&amp; <a href="#37">part</a>
+<a href=#40 id=40 data-nosnippet>40</a>                    .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.bytes">bytes</a>()
+<a href=#41 id=41 data-nosnippet>41</a>                    .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.all">all</a>(|b| <a href="#41">b</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.num.html#method.is_ascii_alphanumeric">is_ascii_alphanumeric</a>() || <span class="string">b"._-"</span>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.slice.html#method.contains">contains</a>(<span class="kw-2">&amp;</span><a href="#41">b</a>))
+<a href=#42 id=42 data-nosnippet>42</a>        };
+<a href=#43 id=43 data-nosnippet>43</a>        <span class="kw">let </span>workflow = <span class="self">Self </span>{
+<a href=#44 id=44 data-nosnippet>44</a>            repo: <a href="https://doc.rust-lang.org/1.96.1/alloc/macro.format.html">format!</a>(<span class="string">"{owner}/{repo}"</span>),
+<a href=#45 id=45 data-nosnippet>45</a>            file: <a href="#36">file</a>.<a href="https://doc.rust-lang.org/1.96.1/alloc/borrow/trait.ToOwned.html#tymethod.to_owned">to_owned</a>(),
+<a href=#46 id=46 data-nosnippet>46</a>        };
+<a href=#47 id=47 data-nosnippet>47</a>        (<a href="#37">named</a>(<a href="#34">owner</a>) &amp;&amp; <a href="#37">named</a>(<a href="#35">repo</a>) &amp;&amp; !<a href="#36">file</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.is_empty">is_empty</a>() &amp;&amp; !<a href="#36">file</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.contains">contains</a>(<span class="string">'/'</span>))
+<a href=#48 id=48 data-nosnippet>48</a>            .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.bool.html#method.then_some">then_some</a>((<a href="#43">workflow</a>, <a href="#30">git_ref</a>))
+<a href=#49 id=49 data-nosnippet>49</a>    }
+<a href=#50 id=50 data-nosnippet>50</a>
+<a href=#51 id=51 data-nosnippet>51</a>    <span class="kw">fn </span>matches(<span class="kw-2">&amp;</span><span class="self">self</span>, file: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>) -&gt; <a href="https://doc.rust-lang.org/1.96.1/std/primitive.bool.html">bool</a> {
+<a href=#52 id=52 data-nosnippet>52</a>        <span class="kw">match </span><a class="self" href="#51">self</a>.file.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.strip_suffix">strip_suffix</a>(<span class="string">'*'</span>) {
+<a href=#53 id=53 data-nosnippet>53</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.Some">Some</a>(prefix) =&gt; <a href="#51">file</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.starts_with">starts_with</a>(<a href="#53">prefix</a>),
+<a href=#54 id=54 data-nosnippet>54</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.None">None</a> =&gt; <a href="#51">file</a> == <a class="self" href="#51">self</a>.file,
+<a href=#55 id=55 data-nosnippet>55</a>        }
+<a href=#56 id=56 data-nosnippet>56</a>    }
+<a href=#57 id=57 data-nosnippet>57</a>}
+<a href=#58 id=58 data-nosnippet>58</a>
+<a href=#59 id=59 data-nosnippet>59</a><span class="kw">impl </span><a href="https://doc.rust-lang.org/1.96.1/core/fmt/trait.Display.html">fmt::Display</a> <span class="kw">for </span><a href="#22-25">Workflow</a> {
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::<a href="https://doc.rust-lang.org/1.96.1/core/fmt/struct.Formatter.html">Formatter</a>&lt;<span class="lifetime">'_</span>&gt;) -&gt; fmt::<a href="https://doc.rust-lang.org/1.96.1/core/fmt/type.Result.html">Result</a> {
+<a href=#61 id=61 data-nosnippet>61</a>        <a href="https://doc.rust-lang.org/1.96.1/core/macro.write.html">write!</a>(<a href="#60">f</a>, <span class="string">"{}/.github/workflows/{}"</span>, <span class="self">self</span>.repo, <span class="self">self</span>.file)
+<a href=#62 id=62 data-nosnippet>62</a>    }
+<a href=#63 id=63 data-nosnippet>63</a>}
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="doccomment">/// `GUARDIAN_PROXY_WORKFLOW`, the workflow the proxy step dispatches, and the branch or tag it runs at.
+<a href=#66 id=66 data-nosnippet>66</a></span><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.proxy_workflow.html">proxy_workflow</a>(ctx: <span class="kw-2">&amp;</span><a href="lib.rs.html#35-41">Ctx</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;(<a href="#22-25">Workflow</a>, <a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>)&gt; {
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="kw">let </span>text = <a href="#66">ctx</a>.env.<a href="env.rs.html#100-103">require</a>(<span class="string">"GUARDIAN_PROXY_WORKFLOW"</span>)<span class="question-mark">?</span>;
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="kw">match </span><a href="#22-25">Workflow</a>::<a href="#29-49">parse</a>(<a href="#67">text</a>) {
+<a href=#69 id=69 data-nosnippet>69</a>        <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.Some">Some</a>((workflow, <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.Some">Some</a>(git_ref)))
+<a href=#70 id=70 data-nosnippet>70</a>            <span class="kw">if </span>!<a href="#69">git_ref</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.is_empty">is_empty</a>()
+<a href=#71 id=71 data-nosnippet>71</a>                &amp;&amp; !<a href="#69">workflow</a>.file.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.contains">contains</a>(<span class="string">'*'</span>)
+<a href=#72 id=72 data-nosnippet>72</a>                &amp;&amp; (<a href="#69">workflow</a>.file.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.ends_with">ends_with</a>(<span class="string">".yml"</span>) || <a href="#69">workflow</a>.file.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.ends_with">ends_with</a>(<span class="string">".yaml"</span>)) =&gt;
+<a href=#73 id=73 data-nosnippet>73</a>        {
+<a href=#74 id=74 data-nosnippet>74</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>((<a href="#69">workflow</a>, <a href="#69">git_ref</a>.<a href="https://doc.rust-lang.org/1.96.1/alloc/borrow/trait.ToOwned.html#tymethod.to_owned">to_owned</a>()))
+<a href=#75 id=75 data-nosnippet>75</a>        }
+<a href=#76 id=76 data-nosnippet>76</a>        <span class="kw">_ </span>=&gt; <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(
+<a href=#77 id=77 data-nosnippet>77</a>            <span class="string">"GUARDIAN_PROXY_WORKFLOW is not &lt;owner&gt;/&lt;repo&gt;/.github/workflows/&lt;file&gt;@&lt;branch or tag&gt;: {text}"
+<a href=#78 id=78 data-nosnippet>78</a>        </span>),
+<a href=#79 id=79 data-nosnippet>79</a>    }
+<a href=#80 id=80 data-nosnippet>80</a>}
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a><span class="doccomment">/// `GUARDIAN_WORKFLOWS`, the workflows that apply the guardian stacks.
+<a href=#83 id=83 data-nosnippet>83</a></span><span class="kw">fn </span>guardian_workflows(ctx: <span class="kw-2">&amp;</span><a href="lib.rs.html#35-41">Ctx</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;<a href="https://doc.rust-lang.org/1.96.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="#22-25">Workflow</a>&gt;&gt; {
+<a href=#84 id=84 data-nosnippet>84</a>    <a href="#83">ctx</a>.env
+<a href=#85 id=85 data-nosnippet>85</a>        .<a href="env.rs.html#100-103">require</a>(<span class="string">"GUARDIAN_WORKFLOWS"</span>)<span class="question-mark">?
+<a href=#86 id=86 data-nosnippet>86</a>        </span>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.split_whitespace">split_whitespace</a>()
+<a href=#87 id=87 data-nosnippet>87</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.map">map</a>(|entry| <span class="kw">match </span><a href="#22-25">Workflow</a>::<a href="#29-49">parse</a>(<a href="#87">entry</a>) {
+<a href=#88 id=88 data-nosnippet>88</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.Some">Some</a>((workflow, <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.None">None</a>))
+<a href=#89 id=89 data-nosnippet>89</a>                <span class="kw">if </span><a href="#88">workflow</a>
+<a href=#90 id=90 data-nosnippet>90</a>                    .file
+<a href=#91 id=91 data-nosnippet>91</a>                    .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.find">find</a>(<span class="string">'*'</span>)
+<a href=#92 id=92 data-nosnippet>92</a>                    .<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.is_none_or">is_none_or</a>(|at| <a href="#92">at</a> + <span class="number">1 </span>== <a href="#88">workflow</a>.file.<a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html#method.len">len</a>()) =&gt;
+<a href=#93 id=93 data-nosnippet>93</a>            {
+<a href=#94 id=94 data-nosnippet>94</a>                <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(<a href="#88">workflow</a>)
+<a href=#95 id=95 data-nosnippet>95</a>            }
+<a href=#96 id=96 data-nosnippet>96</a>            <span class="kw">_ </span>=&gt; <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(
+<a href=#97 id=97 data-nosnippet>97</a>                <span class="string">"GUARDIAN_WORKFLOWS lists {entry}, not &lt;owner&gt;/&lt;repo&gt;/.github/workflows/&lt;file&gt;, where a trailing * matches by prefix"
+<a href=#98 id=98 data-nosnippet>98</a>            </span>),
+<a href=#99 id=99 data-nosnippet>99</a>        })
+<a href=#100 id=100 data-nosnippet>100</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.collect">collect</a>()
+<a href=#101 id=101 data-nosnippet>101</a>}
+<a href=#102 id=102 data-nosnippet>102</a>
+<a href=#103 id=103 data-nosnippet>103</a><span class="doccomment">/// Stops unless `gh` reports the run a dispatch starts, which it does from 2.87 on.
+<a href=#104 id=104 data-nosnippet>104</a></span><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.require_run_urls.html">require_run_urls</a>(ctx: <span class="kw-2">&amp;</span><a href="lib.rs.html#35-41">Ctx</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;()&gt; {
+<a href=#105 id=105 data-nosnippet>105</a>    <span class="kw">let </span>version = <a href="exec.rs.html#200-208">read</a>(<a href="#104">ctx</a>.exec, <span class="kw-2">&amp;</span><a href="exec.rs.html#35-41">Cmd</a>::<a href="exec.rs.html#44-52">new</a>(<span class="string">"gh"</span>).<a href="exec.rs.html#70-73">arg</a>(<span class="string">"--version"</span>))
+<a href=#106 id=106 data-nosnippet>106</a>        .<a href="https://docs.rs/anyhow/1.0.102/anyhow/trait.Context.html#tymethod.context">context</a>(<span class="string">"could not read the GitHub CLI's version"</span>)<span class="question-mark">?</span>;
+<a href=#107 id=107 data-nosnippet>107</a>    <span class="kw">let </span>first = <a href="#105">version</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.lines">lines</a>().<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.next">next</a>().<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="string">""</span>);
+<a href=#108 id=108 data-nosnippet>108</a>    <span class="kw">let </span>numbers: <a href="https://doc.rust-lang.org/1.96.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="https://doc.rust-lang.org/1.96.1/std/primitive.u32.html">u32</a>&gt; = <a href="#107">first</a>
+<a href=#109 id=109 data-nosnippet>109</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.strip_prefix">strip_prefix</a>(<span class="string">"gh version "</span>)
+<a href=#110 id=110 data-nosnippet>110</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="string">""</span>)
+<a href=#111 id=111 data-nosnippet>111</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.split">split</a>(|c: <a href="https://doc.rust-lang.org/1.96.1/std/primitive.char.html">char</a>| !<a href="#111">c</a>.<a href="https://doc.rust-lang.org/1.96.1/core/char/foreigntype.methods.html#method.is_ascii_digit">is_ascii_digit</a>())
+<a href=#112 id=112 data-nosnippet>112</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.take">take</a>(<span class="number">2</span>)
+<a href=#113 id=113 data-nosnippet>113</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.filter_map">filter_map</a>(|part| <a href="#113">part</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.parse">parse</a>().<a href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#method.ok">ok</a>())
+<a href=#114 id=114 data-nosnippet>114</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.collect">collect</a>();
+<a href=#115 id=115 data-nosnippet>115</a>    <span class="kw">match </span><a href="#108">numbers</a>[..] {
+<a href=#116 id=116 data-nosnippet>116</a>        [major, minor] <span class="kw">if </span><a href="#116">major</a> &gt; <span class="number">2 </span>|| (<a href="#116">major</a> == <span class="number">2 </span>&amp;&amp; <a href="#116">minor</a> &gt;= <span class="number">87</span>) =&gt; <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(()),
+<a href=#117 id=117 data-nosnippet>117</a>        <span class="kw">_ </span>=&gt; <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(
+<a href=#118 id=118 data-nosnippet>118</a>            <span class="string">"this step needs GitHub CLI 2.87 or later, which reports the run it dispatches; found: {first}"
+<a href=#119 id=119 data-nosnippet>119</a>        </span>),
+<a href=#120 id=120 data-nosnippet>120</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>}
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a><span class="doccomment">/// Stops while a workflow that applies the guardian stacks has a run that hasn't completed, since it would race this
+<a href=#124 id=124 data-nosnippet>124</a>/// step: one `GUARDIAN_WORKFLOWS` lists, or the proxy's. A reusable workflow's runs are listed under its caller's.
+<a href=#125 id=125 data-nosnippet>125</a></span><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.require_no_guardian_runs.html">require_no_guardian_runs</a>(ctx: <span class="kw-2">&amp;</span><a href="lib.rs.html#35-41">Ctx</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;()&gt; {
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="kw">let </span><span class="kw-2">mut </span>workflows = <a href="#83-101">guardian_workflows</a>(<a href="#125">ctx</a>)<span class="question-mark">?</span>;
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="kw">if </span><a href="#125">ctx</a>.env.<a href="env.rs.html#92-98">get</a>(<span class="string">"GUARDIAN_PROXY_WORKFLOW"</span>).<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.is_some">is_some</a>() {
+<a href=#128 id=128 data-nosnippet>128</a>        <a href="#126">workflows</a>.<a href="https://doc.rust-lang.org/1.96.1/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="#66-80">proxy_workflow</a>(<a href="#125">ctx</a>)<span class="question-mark">?</span>.<span class="number">0</span>);
+<a href=#129 id=129 data-nosnippet>129</a>    }
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="kw">let </span>repos: <a href="https://doc.rust-lang.org/1.96.1/alloc/collections/btree/set/struct.BTreeSet.html">BTreeSet</a>&lt;<span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>&gt; = <a href="#126">workflows</a>
+<a href=#131 id=131 data-nosnippet>131</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#132 id=132 data-nosnippet>132</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.map">map</a>(|workflow| <a href="#132">workflow</a>.repo.<a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html#method.as_str">as_str</a>())
+<a href=#133 id=133 data-nosnippet>133</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.collect">collect</a>();
+<a href=#134 id=134 data-nosnippet>134</a>    <span class="kw">for </span>repo <span class="kw">in </span>repos {
+<a href=#135 id=135 data-nosnippet>135</a>        <span class="comment">// A run that waits for an approval or a concurrency slot starts once it has one.
+<a href=#136 id=136 data-nosnippet>136</a>        </span><span class="kw">for </span>status <span class="kw">in </span>[<span class="string">"requested"</span>, <span class="string">"waiting"</span>, <span class="string">"pending"</span>, <span class="string">"queued"</span>, <span class="string">"in_progress"</span>] {
+<a href=#137 id=137 data-nosnippet>137</a>            <span class="kw">let </span>paths = read(
+<a href=#138 id=138 data-nosnippet>138</a>                ctx.exec,
+<a href=#139 id=139 data-nosnippet>139</a>                <span class="kw-2">&amp;</span>Cmd::new(<span class="string">"gh"</span>)
+<a href=#140 id=140 data-nosnippet>140</a>                    .args([<span class="string">"api"</span>, <span class="string">"--paginate"</span>])
+<a href=#141 id=141 data-nosnippet>141</a>                    .arg(<span class="macro">format!</span>(
+<a href=#142 id=142 data-nosnippet>142</a>                        <span class="string">"repos/{repo}/actions/runs?status={status}&amp;per_page=100"
+<a href=#143 id=143 data-nosnippet>143</a>                    </span>))
+<a href=#144 id=144 data-nosnippet>144</a>                    .args([<span class="string">"--jq"</span>, <span class="string">".workflow_runs[].path"</span>]),
+<a href=#145 id=145 data-nosnippet>145</a>            )
+<a href=#146 id=146 data-nosnippet>146</a>            .with_context(|| <span class="macro">format!</span>(<span class="string">"could not list {repo}'s {status} workflow runs"</span>))<span class="question-mark">?</span>;
+<a href=#147 id=147 data-nosnippet>147</a>            <span class="comment">// GitHub can name the ref a run's workflow came from after an @.
+<a href=#148 id=148 data-nosnippet>148</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(path) = paths
+<a href=#149 id=149 data-nosnippet>149</a>                .lines()
+<a href=#150 id=150 data-nosnippet>150</a>                .map(|path| path.split(<span class="string">'@'</span>).next().unwrap_or(path))
+<a href=#151 id=151 data-nosnippet>151</a>                .find(|path| {
+<a href=#152 id=152 data-nosnippet>152</a>                    path.strip_prefix(<span class="string">".github/workflows/"</span>).is_some_and(|file| {
+<a href=#153 id=153 data-nosnippet>153</a>                        workflows
+<a href=#154 id=154 data-nosnippet>154</a>                            .iter()
+<a href=#155 id=155 data-nosnippet>155</a>                            .any(|workflow| workflow.repo == repo &amp;&amp; workflow.matches(file))
+<a href=#156 id=156 data-nosnippet>156</a>                    })
+<a href=#157 id=157 data-nosnippet>157</a>                })
+<a href=#158 id=158 data-nosnippet>158</a>            {
+<a href=#159 id=159 data-nosnippet>159</a>                <span class="macro">bail!</span>(
+<a href=#160 id=160 data-nosnippet>160</a>                    <span class="string">"{repo}'s {path} has a run {status}, and it applies the guardian stacks too; wait for it to finish"
+<a href=#161 id=161 data-nosnippet>161</a>                </span>);
+<a href=#162 id=162 data-nosnippet>162</a>            }
+<a href=#163 id=163 data-nosnippet>163</a>        }
+<a href=#164 id=164 data-nosnippet>164</a>    }
+<a href=#165 id=165 data-nosnippet>165</a>    <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(())
+<a href=#166 id=166 data-nosnippet>166</a>}
+<a href=#167 id=167 data-nosnippet>167</a>
+<a href=#168 id=168 data-nosnippet>168</a><span class="doccomment">/// Dispatches a workflow and returns the ID of the run it started.
+<a href=#169 id=169 data-nosnippet>169</a></span><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.dispatch.html">dispatch</a>(
+<a href=#170 id=170 data-nosnippet>170</a>    ctx: <span class="kw-2">&amp;</span><a href="lib.rs.html#35-41">Ctx</a>,
+<a href=#171 id=171 data-nosnippet>171</a>    repo: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>,
+<a href=#172 id=172 data-nosnippet>172</a>    workflow: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>,
+<a href=#173 id=173 data-nosnippet>173</a>    git_ref: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>,
+<a href=#174 id=174 data-nosnippet>174</a>    inputs: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>, <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>)],
+<a href=#175 id=175 data-nosnippet>175</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;<a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>&gt; {
+<a href=#176 id=176 data-nosnippet>176</a>    <span class="kw">let </span><span class="kw-2">mut </span>cmd = <a href="exec.rs.html#35-41">Cmd</a>::<a href="exec.rs.html#44-52">new</a>(<span class="string">"gh"</span>).<a href="exec.rs.html#75-79">args</a>([
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="string">"workflow"</span>, <span class="string">"run"</span>, <a href="#172">workflow</a>, <span class="string">"--repo"</span>, <a href="#171">repo</a>, <span class="string">"--ref"</span>, <a href="#173">git_ref</a>,
+<a href=#178 id=178 data-nosnippet>178</a>    ]);
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="kw">for </span>(key, value) <span class="kw">in </span>inputs {
+<a href=#180 id=180 data-nosnippet>180</a>        cmd = cmd.arg(<span class="string">"-f"</span>).arg(<span class="macro">format!</span>(<span class="string">"{key}={value}"</span>));
+<a href=#181 id=181 data-nosnippet>181</a>    }
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="comment">// A failure may come after GitHub has started the run, so neither message reads as though dispatching again were
+<a href=#183 id=183 data-nosnippet>183</a>    // safe.
+<a href=#184 id=184 data-nosnippet>184</a>    </span><span class="kw">let </span>printed = <a href="exec.rs.html#200-208">read</a>(<a href="#170">ctx</a>.exec, <span class="kw-2">&amp;</span><a href="#176">cmd</a>).<a href="https://docs.rs/anyhow/1.0.102/anyhow/trait.Context.html#tymethod.with_context">with_context</a>(|| {
+<a href=#185 id=185 data-nosnippet>185</a>        <a href="https://doc.rust-lang.org/1.96.1/alloc/macro.format.html">format!</a>(
+<a href=#186 id=186 data-nosnippet>186</a>            <span class="string">"could not tell whether {workflow} was dispatched; check {repo}'s runs before going on"
+<a href=#187 id=187 data-nosnippet>187</a>        </span>)
+<a href=#188 id=188 data-nosnippet>188</a>    })<span class="question-mark">?</span>;
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="kw">let </span>url = <a href="#184">printed</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.trim">trim</a>().<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.lines">lines</a>().<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.last">last</a>().<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="string">""</span>);
+<a href=#190 id=190 data-nosnippet>190</a>    <span class="comment">// GitHub spells the owner and repository its own way, whatever case the environment file used.
+<a href=#191 id=191 data-nosnippet>191</a>    </span><span class="kw">let </span>runs = <a href="https://doc.rust-lang.org/1.96.1/alloc/macro.format.html">format!</a>(<span class="string">"https://github.com/{repo}/actions/runs/"</span>);
+<a href=#192 id=192 data-nosnippet>192</a>    <span class="kw">let </span>id = <a href="#189">url</a>
+<a href=#193 id=193 data-nosnippet>193</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.get">get</a>(..runs.len())
+<a href=#194 id=194 data-nosnippet>194</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.filter">filter</a>(|start| <a href="#194">start</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.eq_ignore_ascii_case">eq_ignore_ascii_case</a>(<span class="kw-2">&amp;</span><a href="#191">runs</a>))
+<a href=#195 id=195 data-nosnippet>195</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.and_then">and_then</a>(|<span class="kw">_</span>| <a href="#189">url</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.get">get</a>(runs.len()..))
+<a href=#196 id=196 data-nosnippet>196</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="string">""</span>);
+<a href=#197 id=197 data-nosnippet>197</a>    <span class="kw">if </span><a href="#192">id</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.is_empty">is_empty</a>() || !<a href="#192">id</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.bytes">bytes</a>().<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.all">all</a>(|b| <a href="#197">b</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.num.html#method.is_ascii_digit">is_ascii_digit</a>()) {
+<a href=#198 id=198 data-nosnippet>198</a>        <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(<span class="string">"dispatched {workflow}, but could not tell which run it started: {url}"</span>);
+<a href=#199 id=199 data-nosnippet>199</a>    }
+<a href=#200 id=200 data-nosnippet>200</a>    <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(<a href="#192">id</a>.<a href="https://doc.rust-lang.org/1.96.1/alloc/borrow/trait.ToOwned.html#tymethod.to_owned">to_owned</a>())
+<a href=#201 id=201 data-nosnippet>201</a>}
+<a href=#202 id=202 data-nosnippet>202</a>
+<a href=#203 id=203 data-nosnippet>203</a><span class="doccomment">/// What GitHub says of a run.
+<a href=#204 id=204 data-nosnippet>204</a></span><span class="attr">#[derive(<a href="https://docs.rs/serde_derive/1.0.228/serde_derive/derive.Deserialize.html">Deserialize</a>)]
+<a href=#205 id=205 data-nosnippet>205</a>#[serde(rename_all = <span class="string">"camelCase"</span>)]
+<a href=#206 id=206 data-nosnippet>206</a></span><span class="kw">pub struct </span><a href="../../hashi_guardian_ops/github/struct.Run.html">Run</a> {
+<a href=#207 id=207 data-nosnippet>207</a>    <span class="kw">pub </span>event: <a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>,
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="kw">pub </span>workflow_name: <a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>,
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="kw">pub </span>conclusion: <a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>,
+<a href=#210 id=210 data-nosnippet>210</a>}
+<a href=#211 id=211 data-nosnippet>211</a>
+<a href=#212 id=212 data-nosnippet>212</a><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.run.html">run</a>(ctx: <span class="kw-2">&amp;</span><a href="lib.rs.html#35-41">Ctx</a>, repo: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>, run_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;<a href="#206-210">Run</a>&gt; {
+<a href=#213 id=213 data-nosnippet>213</a>    <a href="exec.rs.html#211-219">read_json</a>(
+<a href=#214 id=214 data-nosnippet>214</a>        <a href="#212">ctx</a>.exec,
+<a href=#215 id=215 data-nosnippet>215</a>        <span class="kw-2">&amp;</span><a href="exec.rs.html#35-41">Cmd</a>::<a href="exec.rs.html#44-52">new</a>(<span class="string">"gh"</span>)
+<a href=#216 id=216 data-nosnippet>216</a>            .<a href="exec.rs.html#75-79">args</a>([<span class="string">"run"</span>, <span class="string">"view"</span>, <a href="#212">run_id</a>, <span class="string">"--repo"</span>, <a href="#212">repo</a>])
+<a href=#217 id=217 data-nosnippet>217</a>            .<a href="exec.rs.html#75-79">args</a>([<span class="string">"--json"</span>, <span class="string">"event,workflowName,conclusion"</span>]),
+<a href=#218 id=218 data-nosnippet>218</a>    )
+<a href=#219 id=219 data-nosnippet>219</a>    .<a href="https://docs.rs/anyhow/1.0.102/anyhow/trait.Context.html#tymethod.with_context">with_context</a>(|| <a href="https://doc.rust-lang.org/1.96.1/alloc/macro.format.html">format!</a>(<span class="string">"could not read run {run_id} of {repo}"</span>))
+<a href=#220 id=220 data-nosnippet>220</a>}
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a><span class="doccomment">/// Waits for a run to finish, and stops unless it succeeded. A watch that fails tells nothing of the run itself, which
+<a href=#223 id=223 data-nosnippet>223</a>/// may still be going or may have succeeded, so its conclusion is asked for then.
+<a href=#224 id=224 data-nosnippet>224</a></span><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.watch.html">watch</a>(ctx: <span class="kw-2">&amp;</span><a href="lib.rs.html#35-41">Ctx</a>, repo: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>, run_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;()&gt; {
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="kw">let </span>watched = <a href="exec.rs.html#200-208">read</a>(
+<a href=#226 id=226 data-nosnippet>226</a>        <a href="#224">ctx</a>.exec,
+<a href=#227 id=227 data-nosnippet>227</a>        <span class="kw-2">&amp;</span><a href="exec.rs.html#35-41">Cmd</a>::<a href="exec.rs.html#44-52">new</a>(<span class="string">"gh"</span>).<a href="exec.rs.html#75-79">args</a>([<span class="string">"run"</span>, <span class="string">"watch"</span>, <a href="#224">run_id</a>, <span class="string">"--repo"</span>, <a href="#224">repo</a>, <span class="string">"--exit-status"</span>]),
+<a href=#228 id=228 data-nosnippet>228</a>    );
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="kw">if </span><a href="#225">watched</a>.<a href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#method.is_ok">is_ok</a>() {
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">return </span><a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(());
+<a href=#231 id=231 data-nosnippet>231</a>    }
+<a href=#232 id=232 data-nosnippet>232</a>    <span class="kw">let </span>url = <a href="https://doc.rust-lang.org/1.96.1/alloc/macro.format.html">format!</a>(<span class="string">"https://github.com/{repo}/actions/runs/{run_id}"</span>);
+<a href=#233 id=233 data-nosnippet>233</a>    <span class="kw">match </span><a href="#212-220">run</a>(<a href="#224">ctx</a>, <a href="#224">repo</a>, <a href="#224">run_id</a>) {
+<a href=#234 id=234 data-nosnippet>234</a>        <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(run) <span class="kw">if </span><a href="#234">run</a>.conclusion == <span class="string">"success" </span>=&gt; <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(()),
+<a href=#235 id=235 data-nosnippet>235</a>        <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(run) <span class="kw">if </span>!<a href="#235">run</a>.conclusion.<a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html#method.is_empty">is_empty</a>() =&gt; <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(<span class="string">"run {url} ended in {}"</span>, run.conclusion),
+<a href=#236 id=236 data-nosnippet>236</a>        <span class="kw">_ </span>=&gt; <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(<span class="string">"could not tell how run {url} ends; check it there before going on"</span>),
+<a href=#237 id=237 data-nosnippet>237</a>    }
+<a href=#238 id=238 data-nosnippet>238</a>}
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a><span class="doccomment">/// The PCR0 both runners of a measurement agree on, from their `nitro.pcrs` files.
+<a href=#241 id=241 data-nosnippet>241</a></span><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.agreed_pcr0.html">agreed_pcr0</a>(pcrs: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>]) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;<a href="https://doc.rust-lang.org/1.96.1/alloc/string/struct.String.html">String</a>&gt; {
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="kw">let </span>measured: <a href="https://doc.rust-lang.org/1.96.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>&gt; = <a href="#241">pcrs</a>
+<a href=#243 id=243 data-nosnippet>243</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#244 id=244 data-nosnippet>244</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.flat_map">flat_map</a>(|file| <a href="#244">file</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.lines">lines</a>())
+<a href=#245 id=245 data-nosnippet>245</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.filter">filter</a>(|line| <a href="#245">line</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.contains">contains</a>(<span class="string">"PCR0"</span>))
+<a href=#246 id=246 data-nosnippet>246</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.filter_map">filter_map</a>(|line| <a href="#246">line</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.split_whitespace">split_whitespace</a>().<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.next">next</a>())
+<a href=#247 id=247 data-nosnippet>247</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.collect">collect</a>();
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="kw">match </span><a href="#242">measured</a>[..] {
+<a href=#249 id=249 data-nosnippet>249</a>        [first, second] <span class="kw">if </span><a href="#249">first</a> == <a href="#249">second</a> &amp;&amp; <span class="kw">crate</span>::stack::<a href="stack.rs.html#463-468">is_hex</a>(<a href="#249">first</a>, <span class="number">96</span>) =&gt; {
+<a href=#250 id=250 data-nosnippet>250</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(<a href="#249">first</a>.<a href="https://doc.rust-lang.org/1.96.1/alloc/borrow/trait.ToOwned.html#tymethod.to_owned">to_owned</a>())
+<a href=#251 id=251 data-nosnippet>251</a>        }
+<a href=#252 id=252 data-nosnippet>252</a>        <span class="kw">_ </span>=&gt; <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(
+<a href=#253 id=253 data-nosnippet>253</a>            <span class="string">"the two runners did not agree on one PCR0: {}"</span>,
+<a href=#254 id=254 data-nosnippet>254</a>            measured.join(<span class="string">" "</span>)
+<a href=#255 id=255 data-nosnippet>255</a>        ),
+<a href=#256 id=256 data-nosnippet>256</a>    }
+<a href=#257 id=257 data-nosnippet>257</a>}
+<a href=#258 id=258 data-nosnippet>258</a>
+<a href=#259 id=259 data-nosnippet>259</a><span class="doccomment">/// Stops unless a measurement run's log shows it built `commit` on both runners, with no feature that changes the
+<a href=#260 id=260 data-nosnippet>260</a>/// image, such as `non-enclave-dev`.
+<a href=#261 id=261 data-nosnippet>261</a></span><span class="kw">pub fn </span><a href="../../hashi_guardian_ops/github/fn.require_canonical_build.html">require_canonical_build</a>(log: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>, run_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>, commit: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>) -&gt; <a class="prelude-ty" href="https://docs.rs/anyhow/1.0.102/anyhow/type.Result.html">Result</a>&lt;()&gt; {
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">let </span>checkout = <a href="https://doc.rust-lang.org/1.96.1/alloc/macro.format.html">format!</a>(<span class="string">"checkout --progress --force {commit}"</span>);
+<a href=#263 id=263 data-nosnippet>263</a>    <span class="kw">let </span>checkouts = <a href="#261">log</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.lines">lines</a>().<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.filter">filter</a>(|line| <a href="#263">line</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.contains">contains</a>(<span class="kw-2">&amp;</span><a href="#262">checkout</a>)).<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.count">count</a>();
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="kw">if </span><a href="#263">checkouts</a> != <span class="number">2 </span>{
+<a href=#265 id=265 data-nosnippet>265</a>        <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(<span class="string">"run {run_id} did not build {commit} on both runners"</span>);
+<a href=#266 id=266 data-nosnippet>266</a>    }
+<a href=#267 id=267 data-nosnippet>267</a>    <span class="comment">// Each runner's steps print their environment, FEATURES among it; the build recipe's own `${FEATURES:+...}` has no
+<a href=#268 id=268 data-nosnippet>268</a>    // space after the colon.
+<a href=#269 id=269 data-nosnippet>269</a>    </span><span class="kw">let </span>features: <a href="https://doc.rust-lang.org/1.96.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>&gt; = <a href="#261">log</a>
+<a href=#270 id=270 data-nosnippet>270</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.lines">lines</a>()
+<a href=#271 id=271 data-nosnippet>271</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.filter_map">filter_map</a>(|line| <a href="#271">line</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.split_once">split_once</a>(<span class="string">"FEATURES:"</span>).<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.map">map</a>(|(<span class="kw">_</span>, rest)| <a href="#271">rest</a>))
+<a href=#272 id=272 data-nosnippet>272</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.filter">filter</a>(|rest| <a href="#272">rest</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.starts_with">starts_with</a>(<a href="https://doc.rust-lang.org/1.96.1/std/primitive.char.html">char</a>::<a href="https://doc.rust-lang.org/1.96.1/core/char/foreigntype.methods.html#method.is_whitespace">is_whitespace</a>))
+<a href=#273 id=273 data-nosnippet>273</a>        .<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.collect">collect</a>();
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">if </span><a href="#269">features</a>.<a href="https://doc.rust-lang.org/1.96.1/alloc/vec/struct.Vec.html#method.len">len</a>() &lt; <span class="number">2 </span>{
+<a href=#275 id=275 data-nosnippet>275</a>        <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(
+<a href=#276 id=276 data-nosnippet>276</a>            <span class="string">"run {run_id}'s log does not show the features of both builds, so it cannot tell they had none"
+<a href=#277 id=277 data-nosnippet>277</a>        </span>);
+<a href=#278 id=278 data-nosnippet>278</a>    }
+<a href=#279 id=279 data-nosnippet>279</a>    <span class="kw">if </span><a href="#269">features</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.96.1/core/iter/traits/iterator/trait.Iterator.html#method.any">any</a>(|rest| !<a href="#279">rest</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.trim">trim</a>().<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.str.html#method.is_empty">is_empty</a>()) {
+<a href=#280 id=280 data-nosnippet>280</a>        <a href="https://docs.rs/anyhow/1.0.102/anyhow/macro.bail.html">bail!</a>(
+<a href=#281 id=281 data-nosnippet>281</a>            <span class="string">"run {run_id} built with extra features, so it does not measure the guardian's image"
+<a href=#282 id=282 data-nosnippet>282</a>        </span>);
+<a href=#283 id=283 data-nosnippet>283</a>    }
+<a href=#284 id=284 data-nosnippet>284</a>    <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/result/enum.Result.html#variant.Ok">Ok</a>(())
+<a href=#285 id=285 data-nosnippet>285</a>}
+<a href=#286 id=286 data-nosnippet>286</a>
+<a href=#287 id=287 data-nosnippet>287</a><span class="attr">#[cfg(test)]
+<a href=#288 id=288 data-nosnippet>288</a></span><span class="kw">mod </span>tests {
+<a href=#289 id=289 data-nosnippet>289</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#290 id=290 data-nosnippet>290</a>
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">fn </span>workflow(file: <span class="kw-2">&amp;</span>str) -&gt; Workflow {
+<a href=#292 id=292 data-nosnippet>292</a>        Workflow {
+<a href=#293 id=293 data-nosnippet>293</a>            repo: <span class="string">"org/infra"</span>.to_owned(),
+<a href=#294 id=294 data-nosnippet>294</a>            file: file.to_owned(),
+<a href=#295 id=295 data-nosnippet>295</a>        }
+<a href=#296 id=296 data-nosnippet>296</a>    }
+<a href=#297 id=297 data-nosnippet>297</a>
+<a href=#298 id=298 data-nosnippet>298</a>    <span class="attr">#[test]
+<a href=#299 id=299 data-nosnippet>299</a>    </span><span class="kw">fn </span>reads_workflows_as_uses_names_them() {
+<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">let </span>repo = tempfile::tempdir().unwrap();
+<a href=#301 id=301 data-nosnippet>301</a>        <span class="kw">let </span>exec = <span class="kw">crate</span>::exec::fake::Fake::new(|<span class="kw">_</span>| <span class="prelude-val">None</span>);
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">let </span>proxy = |text: <span class="kw-2">&amp;</span>str| {
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="kw">let </span>ctx = Ctx::for_test(repo.path(), <span class="kw-2">&amp;</span>exec, <span class="kw-2">&amp;</span>[(<span class="string">"GUARDIAN_PROXY_WORKFLOW"</span>, text)]);
+<a href=#304 id=304 data-nosnippet>304</a>            proxy_workflow(<span class="kw-2">&amp;</span>ctx).map_err(|error| error.to_string())
+<a href=#305 id=305 data-nosnippet>305</a>        };
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="macro">assert_eq!</span>(
+<a href=#307 id=307 data-nosnippet>307</a>            proxy(<span class="string">"org/infra/.github/workflows/proxy.yaml@main"</span>).unwrap(),
+<a href=#308 id=308 data-nosnippet>308</a>            (workflow(<span class="string">"proxy.yaml"</span>), <span class="string">"main"</span>.to_owned())
+<a href=#309 id=309 data-nosnippet>309</a>        );
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="macro">assert_eq!</span>(
+<a href=#311 id=311 data-nosnippet>311</a>            proxy(<span class="string">"org/infra/.github/workflows/proxy.yml@release/1"</span>).unwrap(),
+<a href=#312 id=312 data-nosnippet>312</a>            (workflow(<span class="string">"proxy.yml"</span>), <span class="string">"release/1"</span>.to_owned())
+<a href=#313 id=313 data-nosnippet>313</a>        );
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="kw">for </span>bad <span class="kw">in </span>[
+<a href=#315 id=315 data-nosnippet>315</a>            <span class="string">"org/infra/.github/workflows/proxy.yaml"</span>,
+<a href=#316 id=316 data-nosnippet>316</a>            <span class="string">"org/infra/.github/workflows/proxy.yaml@"</span>,
+<a href=#317 id=317 data-nosnippet>317</a>            <span class="string">"org/infra/.github/workflows/proxy-*@main"</span>,
+<a href=#318 id=318 data-nosnippet>318</a>            <span class="string">"org/infra/.github/workflows/nested/proxy.yaml@main"</span>,
+<a href=#319 id=319 data-nosnippet>319</a>            <span class="string">"org/infra/workflows/proxy.yaml@main"</span>,
+<a href=#320 id=320 data-nosnippet>320</a>            <span class="string">"org/infra/.github/workflows/proxy.json@main"</span>,
+<a href=#321 id=321 data-nosnippet>321</a>            <span class="string">"org/in fra/.github/workflows/proxy.yaml@main"</span>,
+<a href=#322 id=322 data-nosnippet>322</a>        ] {
+<a href=#323 id=323 data-nosnippet>323</a>            <span class="macro">assert_eq!</span>(
+<a href=#324 id=324 data-nosnippet>324</a>                proxy(bad).unwrap_err(),
+<a href=#325 id=325 data-nosnippet>325</a>                <span class="macro">format!</span>(
+<a href=#326 id=326 data-nosnippet>326</a>                    <span class="string">"GUARDIAN_PROXY_WORKFLOW is not &lt;owner&gt;/&lt;repo&gt;/.github/workflows/&lt;file&gt;@&lt;branch or tag&gt;: {bad}"
+<a href=#327 id=327 data-nosnippet>327</a>                </span>)
+<a href=#328 id=328 data-nosnippet>328</a>            );
+<a href=#329 id=329 data-nosnippet>329</a>        }
+<a href=#330 id=330 data-nosnippet>330</a>
+<a href=#331 id=331 data-nosnippet>331</a>        <span class="kw">let </span>listed = |text: <span class="kw-2">&amp;</span>str| {
+<a href=#332 id=332 data-nosnippet>332</a>            <span class="kw">let </span>ctx = Ctx::for_test(repo.path(), <span class="kw-2">&amp;</span>exec, <span class="kw-2">&amp;</span>[(<span class="string">"GUARDIAN_WORKFLOWS"</span>, text)]);
+<a href=#333 id=333 data-nosnippet>333</a>            guardian_workflows(<span class="kw-2">&amp;</span>ctx).map_err(|error| error.to_string())
+<a href=#334 id=334 data-nosnippet>334</a>        };
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="kw">let </span>found = listed(
+<a href=#336 id=336 data-nosnippet>336</a>            <span class="string">"org/infra/.github/workflows/guardian-* org/infra/.github/workflows/deploy.yaml"</span>,
+<a href=#337 id=337 data-nosnippet>337</a>        )
+<a href=#338 id=338 data-nosnippet>338</a>        .unwrap();
+<a href=#339 id=339 data-nosnippet>339</a>        <span class="macro">assert_eq!</span>(found, [workflow(<span class="string">"guardian-*"</span>), workflow(<span class="string">"deploy.yaml"</span>)]);
+<a href=#340 id=340 data-nosnippet>340</a>        <span class="macro">assert!</span>(found[<span class="number">0</span>].matches(<span class="string">"guardian-proxy.yaml"</span>));
+<a href=#341 id=341 data-nosnippet>341</a>        <span class="macro">assert!</span>(!found[<span class="number">0</span>].matches(<span class="string">"lint.yml"</span>));
+<a href=#342 id=342 data-nosnippet>342</a>        <span class="macro">assert!</span>(found[<span class="number">1</span>].matches(<span class="string">"deploy.yaml"</span>));
+<a href=#343 id=343 data-nosnippet>343</a>        <span class="macro">assert!</span>(!found[<span class="number">1</span>].matches(<span class="string">"deploy.yaml.old"</span>));
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="kw">for </span>bad <span class="kw">in </span>[
+<a href=#345 id=345 data-nosnippet>345</a>            <span class="string">"org/infra/.github/workflows/guardian-*@main"</span>,
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="string">"org/infra/.github/workflows/*-guardian.yaml"</span>,
+<a href=#347 id=347 data-nosnippet>347</a>        ] {
+<a href=#348 id=348 data-nosnippet>348</a>            <span class="macro">assert!</span>(
+<a href=#349 id=349 data-nosnippet>349</a>                listed(bad)
+<a href=#350 id=350 data-nosnippet>350</a>                    .unwrap_err()
+<a href=#351 id=351 data-nosnippet>351</a>                    .starts_with(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"GUARDIAN_WORKFLOWS lists {bad}"</span>))
+<a href=#352 id=352 data-nosnippet>352</a>            );
+<a href=#353 id=353 data-nosnippet>353</a>        }
+<a href=#354 id=354 data-nosnippet>354</a>    }
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="attr">#[test]
+<a href=#357 id=357 data-nosnippet>357</a>    </span><span class="kw">fn </span>dispatches_only_into_a_run_of_the_workflows_repository() {
+<a href=#358 id=358 data-nosnippet>358</a>        <span class="kw">let </span>repo = tempfile::tempdir().unwrap();
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="kw">let </span>dispatched = |printed: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, succeeds: bool| {
+<a href=#360 id=360 data-nosnippet>360</a>            <span class="kw">let </span>exec = <span class="kw">crate</span>::exec::fake::Fake::new(<span class="kw">move </span>|<span class="kw">_</span>| <span class="prelude-val">Some</span>((succeeds, printed.to_owned())));
+<a href=#361 id=361 data-nosnippet>361</a>            <span class="kw">let </span>ctx = Ctx::for_test(repo.path(), <span class="kw-2">&amp;</span>exec, <span class="kw-2">&amp;</span>[]);
+<a href=#362 id=362 data-nosnippet>362</a>            dispatch(<span class="kw-2">&amp;</span>ctx, <span class="string">"org/infra"</span>, <span class="string">"proxy.yaml"</span>, <span class="string">"main"</span>, <span class="kw-2">&amp;</span>[])
+<a href=#363 id=363 data-nosnippet>363</a>                .map_err(|error| error.to_string())
+<a href=#364 id=364 data-nosnippet>364</a>        };
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="macro">assert_eq!</span>(
+<a href=#366 id=366 data-nosnippet>366</a>            dispatched(<span class="string">"https://github.com/org/infra/actions/runs/456\n"</span>, <span class="bool-val">true</span>).unwrap(),
+<a href=#367 id=367 data-nosnippet>367</a>            <span class="string">"456"
+<a href=#368 id=368 data-nosnippet>368</a>        </span>);
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="macro">assert_eq!</span>(
+<a href=#370 id=370 data-nosnippet>370</a>            dispatched(<span class="string">"https://github.com/Org/Infra/actions/runs/456\n"</span>, <span class="bool-val">true</span>).unwrap(),
+<a href=#371 id=371 data-nosnippet>371</a>            <span class="string">"456"
+<a href=#372 id=372 data-nosnippet>372</a>        </span>);
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="macro">assert!</span>(
+<a href=#374 id=374 data-nosnippet>374</a>            dispatched(<span class="string">"https://github.com/org/other/actions/runs/456\n"</span>, <span class="bool-val">true</span>)
+<a href=#375 id=375 data-nosnippet>375</a>                .unwrap_err()
+<a href=#376 id=376 data-nosnippet>376</a>                .starts_with(<span class="string">"dispatched proxy.yaml, but could not tell which run it started"</span>)
+<a href=#377 id=377 data-nosnippet>377</a>        );
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="macro">assert_eq!</span>(
+<a href=#379 id=379 data-nosnippet>379</a>            dispatched(<span class="string">""</span>, <span class="bool-val">false</span>).unwrap_err(),
+<a href=#380 id=380 data-nosnippet>380</a>            <span class="string">"could not tell whether proxy.yaml was dispatched; check org/infra's runs before going on"
+<a href=#381 id=381 data-nosnippet>381</a>        </span>);
+<a href=#382 id=382 data-nosnippet>382</a>    }
+<a href=#383 id=383 data-nosnippet>383</a>
+<a href=#384 id=384 data-nosnippet>384</a>    <span class="attr">#[test]
+<a href=#385 id=385 data-nosnippet>385</a>    </span><span class="kw">fn </span>needs_both_runners_to_agree() {
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="kw">let </span>pcr0 = <span class="string">"0c"</span>.repeat(<span class="number">48</span>);
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="kw">let </span>file = |value: <span class="kw-2">&amp;</span>str| <span class="macro">format!</span>(<span class="string">"{value} PCR0\n{} PCR1\n"</span>, <span class="string">"1"</span>.repeat(<span class="number">96</span>));
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="macro">assert_eq!</span>(agreed_pcr0(<span class="kw-2">&amp;</span>[file(<span class="kw-2">&amp;</span>pcr0), file(<span class="kw-2">&amp;</span>pcr0)]).unwrap(), pcr0);
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="macro">assert!</span>(agreed_pcr0(<span class="kw-2">&amp;</span>[file(<span class="kw-2">&amp;</span>pcr0), file(<span class="kw-2">&amp;</span><span class="string">"0d"</span>.repeat(<span class="number">48</span>))]).is_err());
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="macro">assert!</span>(agreed_pcr0(<span class="kw-2">&amp;</span>[file(<span class="kw-2">&amp;</span>pcr0)]).is_err());
+<a href=#391 id=391 data-nosnippet>391</a>        <span class="macro">assert!</span>(agreed_pcr0(<span class="kw-2">&amp;</span>[file(<span class="kw-2">&amp;</span>pcr0), file(<span class="kw-2">&amp;</span>pcr0), file(<span class="kw-2">&amp;</span>pcr0)]).is_err());
+<a href=#392 id=392 data-nosnippet>392</a>    }
+<a href=#393 id=393 data-nosnippet>393</a>
+<a href=#394 id=394 data-nosnippet>394</a>    <span class="attr">#[test]
+<a href=#395 id=395 data-nosnippet>395</a>    </span><span class="kw">fn </span>reads_what_the_runners_built() {
+<a href=#396 id=396 data-nosnippet>396</a>        <span class="kw">let </span>commit = <span class="string">"0873917ea3daf0ac99e123215808ad602eb5fafb"</span>;
+<a href=#397 id=397 data-nosnippet>397</a>        <span class="kw">let </span>log = <span class="macro">format!</span>(
+<a href=#398 id=398 data-nosnippet>398</a>            <span class="string">"a\tgit checkout --progress --force {commit}\nb\tgit checkout --progress --force {commit}\na\tFEATURES: \nb\tFEATURES: \na\tRUN cargo build ${{FEATURES:+--features \"$FEATURES\"}}\n"
+<a href=#399 id=399 data-nosnippet>399</a>        </span>);
+<a href=#400 id=400 data-nosnippet>400</a>        require_canonical_build(<span class="kw-2">&amp;</span>log, <span class="string">"1"</span>, commit).unwrap();
+<a href=#401 id=401 data-nosnippet>401</a>        <span class="comment">// A log that doesn't show the features can't show they were empty.
+<a href=#402 id=402 data-nosnippet>402</a>        </span><span class="kw">let </span>unshown = <span class="macro">format!</span>(
+<a href=#403 id=403 data-nosnippet>403</a>            <span class="string">"a\tgit checkout --progress --force {commit}\nb\tgit checkout --progress --force {commit}\n"
+<a href=#404 id=404 data-nosnippet>404</a>        </span>);
+<a href=#405 id=405 data-nosnippet>405</a>        <span class="macro">assert!</span>(require_canonical_build(<span class="kw-2">&amp;</span>unshown, <span class="string">"1"</span>, commit).is_err());
+<a href=#406 id=406 data-nosnippet>406</a>        <span class="kw">let </span>one = <span class="macro">format!</span>(<span class="string">"a\tgit checkout --progress --force {commit}\n"</span>);
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="macro">assert!</span>(require_canonical_build(<span class="kw-2">&amp;</span>one, <span class="string">"1"</span>, commit).is_err());
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">let </span>featured = <span class="macro">format!</span>(<span class="string">"{log}b\tFEATURES:   non-enclave-dev\n"</span>);
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="macro">assert!</span>(require_canonical_build(<span class="kw-2">&amp;</span>featured, <span class="string">"1"</span>, commit).is_err());
+<a href=#410 id=410 data-nosnippet>410</a>    }
+<a href=#411 id=411 data-nosnippet>411</a>}
+</code></pre></div></section></main></body></html>

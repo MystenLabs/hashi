@@ -1,0 +1,128 @@
+# Fees
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> How Hashi charges miner fees on withdrawals, enforces fee bounds, and handles stuck transactions.
+
+Hashi charges no protocol fee. Deposits are free, and every withdrawal
+pays only the Bitcoin **miner fee** required to get the transaction
+confirmed onchain.
+
+## Deposits
+
+Deposits are free. They must meet the configurable
+`bitcoin_deposit_minimum` (initially `30,000 sats`).
+
+## Withdrawal fees
+
+The only fee a user pays on withdrawal is the **miner fee**, the actual
+Bitcoin transaction fee required for onchain confirmation. This is not a
+fixed value. It depends on the current network fee rate and the
+transaction's weight. The user pays this fee through a reduction in their
+withdrawal output amount. There is no protocol fee.
+
+### Why the user pays the miner fee
+
+The UTXO pool belongs to the protocol. If the pool absorbed miner fees,
+every withdrawal would shrink the pool by more than the withdrawn
+amount, effectively socializing costs across all future users. Shifting
+the miner fee to the withdrawing user keeps the pool whole: the
+invariant `input_total = user_output + change` holds, so the change
+output that returns to the pool is undiminished.
+
+### Withdrawal minimum
+
+The protocol enforces a minimum withdrawal amount to guarantee
+that every request can produce a valid Bitcoin transaction even under
+worst-case fee conditions:
+
+```
+bitcoin_withdrawal_minimum = worst_case_network_fee + DUST_RELAY_MIN_VALUE
+```
+
+- `worst_case_network_fee` is the maximum miner fee the protocol ever
+  charges (see below).
+- `DUST_RELAY_MIN_VALUE` (`546 sats`) ensures the user's output remains
+  above Bitcoin's dust threshold after the miner fee deduction.
+
+A user who withdraws exactly the minimum receives, in the worst case, a
+`546 sats` output. In practice, actual miner fees are usually well below
+the worst case, so the user receives more.
+
+## Fee rate estimation
+
+Hashi obtains the current fee rate from the connected Bitcoin Core node
+through `estimatesmartfee` in `ECONOMICAL` mode, targeting confirmation
+within `withdrawal_fee_conf_target` blocks (default `3`, around 30
+minutes; at most `12`). Longer targets would read Core's day- and
+week-long estimation horizons, which lag the fee market.
+
+If Bitcoin Core has no estimate, for example while its estimator warms up
+after a restart, the leader doesn't build withdrawal transactions and
+validators don't sign them. Only regtest, which has no fee market, falls
+back to the floor below.
+
+The estimated fee rate is then floored at 3 sat/vB (configurable per node
+with `withdrawal_min_fee_rate_sat_vb`) but not capped, because a signed
+withdrawal can't be replaced by a higher-fee version. The onchain
+`worst_case_network_fee` bounds each user's share of the miner fee
+instead: while a batch's share would exceed it, the leader waits for fees
+to fall or for more requests to share them, rather than broadcasting a
+transaction that would sit unconfirmed.
+
+Raising that floor on the leader alone only helps so far. Validators
+derive their ceiling from their own floor and estimate, so a fee more than
+3x above what they see is rejected; a larger rescue has to be configured
+across the fleet.
+
+## Worst-case network fee
+
+Every withdrawal is required to cover not just its own onchain footprint
+but also a share of UTXO pool maintenance. At minimum, a withdrawal must
+pay for the fixed transaction overhead, its own recipient output, and a
+change output back to the pool. The additional headroom allows the coin
+selector to consolidate many small UTXOs into fewer large ones during
+normal withdrawal traffic. This is a form of opportunistic UTXO smashing
+that keeps the pool healthy without requiring dedicated consolidation
+transactions.
+
+The worst-case miner fee per withdrawal is derived from the
+governance-configured `bitcoin_withdrawal_minimum` parameter:
+
+```
+worst_case_network_fee = bitcoin_withdrawal_minimum - DUST_RELAY_MIN_VALUE
+```
+
+With defaults: `30,000 - 546 = 29,454` sats.
+
+The actual miner fee is usually well below the worst case. Users are
+charged only for the real transaction weight, not the worst-case
+budget. The difference stays in the user's output.
+
+## Transaction validation fee bounds
+
+When validators verify a proposed withdrawal transaction, they check
+the fee against three bounds:
+
+- **Floor**: the fee must be at least `1 sat/vB` (the minimum relay fee),
+  or the Bitcoin network does not propagate the transaction.
+- **Ceiling**: the fee must not exceed 3x the validator's own fee
+  estimate for the same transaction weight, including any CPFP deficit
+  its unconfirmed ancestors owe. This prevents a malicious leader from
+  overpaying fees to extract value from users.
+- **Per-user cap**: the per-user share of the miner fee must not exceed
+  the worst-case network fee computed from the onchain config. This
+  ensures the Move contract's upfront minimum calculation was
+  sufficient.
+
+## Stuck transactions
+
+Hashi does not attempt to replace stuck transactions with higher-fee
+replacements (Replace-By-Fee, or RBF). Instead, if a transaction is not
+confirmed within a reasonable time, fee bumping relies on CPFP
+(Child Pays For Parent):
+
+- The withdrawal recipient can spend their output with a high-fee child
+  transaction.
+- Hashi can spend the change UTXO that returned to the pool, which also
+  bumps the parent.
