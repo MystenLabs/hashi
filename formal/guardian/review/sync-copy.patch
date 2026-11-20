@@ -1,0 +1,121 @@
+This patch makes the sync copy of the Guardian withdrawal handler for the Lean extraction.
+`extract.sh` applies it to a copy of the workspace. It does not change the repository.
+Review each line. `WithdrawalSpec.lean` gives the reasons why the copy has the same behaviour.
+`no-review/make_patch.py` can write this file again after a change to the Rust code.
+
+--- a/crates/hashi-guardian/src/enclave.rs
++++ b/crates/hashi-guardian/src/enclave.rs
+@@ -36,4 +36,6 @@
+     /// The service serializes writes; the writer tracks the session-heartbeat fence.
+     log_writer: LogWriter,
++    /// Mock S3 log: the withdrawal records, oldest first.
++    pub mock_withdrawal_log: Vec<WithdrawalLogMessage>,
+ }
+ 
+@@ -489,4 +491,5 @@
+             state: EnclaveState::default(),
+             log_writer: LogWriter::new(),
++            mock_withdrawal_log: Vec::new(),
+         }
+     }
+@@ -638,6 +641,7 @@
+     }
+ 
+-    pub async fn log_withdraw(&mut self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
+-        self.write_log(LogMessage::Withdrawal(Box::new(msg))).await
++    pub fn log_withdraw(&mut self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
++        self.mock_withdrawal_log.push(msg);
++        Ok(())
+     }
+ 
+--- a/crates/hashi-guardian/src/service.rs
++++ b/crates/hashi-guardian/src/service.rs
+@@ -182,9 +182,9 @@
+             // Read the clock here, while this task holds the enclave lock.
+             let guardian_now = now_timestamp_secs();
+-            Box::pin(standard_withdrawal::standard_withdrawal(
++            Box::pin(async move { standard_withdrawal::standard_withdrawal(
+                 enclave,
+                 request,
+                 guardian_now,
+-            ))
++            ) })
+         })
+         .await
+--- a/crates/hashi-guardian/src/withdraw_mode/standard_withdrawal.rs
++++ b/crates/hashi-guardian/src/withdraw_mode/standard_withdrawal.rs
+@@ -14,6 +14,4 @@
+ use hashi_types::guardian::StandardWithdrawalResponse;
+ use hashi_types::guardian::WithdrawalLogMessage;
+-use tracing::debug;
+-use tracing::info;
+ 
+ const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
+@@ -24,10 +22,9 @@
+ /// The caller reads the clock, so that the Lean proof can take the clock value as an input.
+ /// The parameter name is not `enclave`, because that name collides with a Lean namespace.
+-pub async fn standard_withdrawal(
++pub fn standard_withdrawal(
+     guardian: &mut Enclave,
+     signed_request: SignedStandardWithdrawalRequestWire,
+     guardian_now: u64,
+ ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
+-    info!("/standard_withdrawal - Received request.");
+ 
+     let network = guardian.config.bitcoin_network()?;
+@@ -36,5 +33,4 @@
+     let wid = *signed_request.message().wid();
+     // Add the wid to the RPC span, so each later log line carries it.
+-    tracing::Span::current().record("wid", tracing::field::display(wid));
+     // 0) Validation
+     guardian.require_fully_initialized()?;
+@@ -43,5 +39,4 @@
+     let committee = guardian.state.get_committee()?;
+ 
+-    debug!("Verifying request certificate.");
+     verify_hashi_cert(
+         guardian.config.hashi_object_id()?,
+@@ -49,5 +44,4 @@
+         &signed_request,
+     )?;
+-    debug!("Request certificate verified.");
+ 
+     let (request_sign, request) = signed_request.into_parts();
+@@ -57,5 +51,4 @@
+     validate_request_timestamp(request.timestamp_secs(), guardian_now)?;
+ 
+-    debug!("Checking rate limits.");
+     // Gross outflow (= inputs - change = external_out + miner_fee).
+     // Miner fee leaves the pool too, so it must consume the limit;
+@@ -67,8 +60,6 @@
+             .state
+             .consume_from_limiter(seq, request.timestamp_secs(), consumed_amount_sats)?;
+-    debug!("Rate limit check passed.");
+ 
+     // 3) Sign tx (while holding the control lock)
+-    debug!("Generating BTC signatures.");
+     let (txid, signatures) = guardian
+         .config
+@@ -78,8 +69,6 @@
+         enclave_signatures: signatures,
+     };
+-    debug!("BTC signatures generated.");
+ 
+     // 4) Log while holding the control lock, before returning signatures.
+-    debug!("Withdrawal signed. Logging to S3.");
+     let msg = WithdrawalLogMessage {
+         txid,
+@@ -91,13 +80,5 @@
+     guardian
+         .log_withdraw(msg)
+-        .await
+         .expect("S3 logger must be initialized to log a withdrawal");
+-    info!(
+-        %txid,
+-        seq,
+-        consumed_sats = consumed_amount_sats,
+-        tokens_available = post_state.num_tokens_available,
+-        "Withdrawal signed and logged"
+-    );
+     Ok(guardian.sign(response))
+ }
