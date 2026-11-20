@@ -809,6 +809,10 @@ pub struct WithdrawalRequestApproval {
 impl hashi_types::intent::IntentMessage for WithdrawalRequestApproval {
     const INTENT: hashi_types::intent::Intent =
         hashi_types::intent::Intent::WithdrawalRequestApproval;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 /// The data that validators BLS-sign over to commit to a withdrawal transaction.
@@ -823,6 +827,10 @@ pub struct WithdrawalTxCommitment {
 
 impl hashi_types::intent::IntentMessage for WithdrawalTxCommitment {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalCommitment;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 /// The data that validators BLS-sign over to store witness signatures on-chain.
@@ -838,6 +846,10 @@ pub struct WithdrawalTxSigning {
 
 impl hashi_types::intent::IntentMessage for WithdrawalTxSigning {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalSigned;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 /// The data validators BLS-sign over for one incremental chunk of per-input MPC
@@ -853,6 +865,10 @@ pub struct MpcInputSignaturesMessage {
 
 impl hashi_types::intent::IntentMessage for MpcInputSignaturesMessage {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::MpcInputSignatures;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 #[derive(Clone, Debug, serde_derive::Serialize)]
@@ -862,6 +878,10 @@ pub struct WithdrawalConfirmation {
 
 impl hashi_types::intent::IntentMessage for WithdrawalConfirmation {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalConfirmation;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 impl Hashi {

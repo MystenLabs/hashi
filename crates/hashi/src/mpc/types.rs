@@ -636,6 +636,10 @@ pub struct DealerMessagesHash {
 
 impl hashi_types::intent::IntentMessage for DealerMessagesHash {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::DealerMessagesHash;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 impl DealerMessagesHash {
@@ -795,6 +799,10 @@ pub struct AvssVoteMessagesHash {
 
 impl hashi_types::intent::IntentMessage for AvssVoteMessagesHash {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::AvssVoteMessagesHash;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 /// AVID pessimistic-path (`CertKind::AvidVote`) signing domain.
@@ -807,6 +815,10 @@ pub struct AvidVoteMessagesHash {
 
 impl hashi_types::intent::IntentMessage for AvidVoteMessagesHash {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::AvidVoteMessagesHash;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 pub(crate) trait NonceCertToVerify {

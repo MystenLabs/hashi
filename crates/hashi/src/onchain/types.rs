@@ -1044,6 +1044,10 @@ pub struct DepositConfirmationMessage {
 
 impl hashi_types::intent::IntentMessage for DepositConfirmationMessage {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::DepositConfirmation;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        hashi_types::intent::bcs_bytes(self)
+    }
 }
 
 #[derive(Debug)]

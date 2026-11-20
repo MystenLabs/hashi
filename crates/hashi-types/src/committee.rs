@@ -896,6 +896,10 @@ pub struct ProofOfPossessionMessage {
 
 impl IntentMessage for ProofOfPossessionMessage {
     const INTENT: Intent = Intent::ProofOfPossession;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        crate::intent::bcs_bytes(self)
+    }
 }
 
 #[derive(Serialize)]
@@ -922,7 +926,10 @@ fn signing_message<T: IntentMessage>(hashi_id: Address, epoch: u64, message: &T)
     // the Hashi object id right after binds the signature to one deployment,
     // so a certificate minted for another Hashi instance (byte-identical
     // committee, same epoch) can never verify here.
-    bcs::to_bytes(&(T::INTENT.as_u16(), hashi_id, epoch, message)).unwrap()
+    // BCS writes a tuple as its fields in sequence. Thus the message bytes go last.
+    let mut bytes = bcs::to_bytes(&(T::INTENT.as_u16(), hashi_id, epoch)).unwrap();
+    bytes.extend_from_slice(&message.payload_bytes());
+    bytes
 }
 
 #[cfg(test)]
@@ -939,6 +946,10 @@ mod test {
     /// Test-only signature domain for raw byte messages.
     impl IntentMessage for Vec<u8> {
         const INTENT: Intent = Intent::Test;
+
+        fn payload_bytes(&self) -> Vec<u8> {
+            crate::intent::bcs_bytes(self)
+        }
     }
 
     /// Locks the signing preimage layout: intent (u16 LE) first, then the

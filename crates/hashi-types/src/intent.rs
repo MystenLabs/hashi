@@ -84,12 +84,25 @@ impl Intent {
 /// A message a Hashi member signs under its BLS or TLS key. `INTENT` is bound
 /// into the signing preimage, giving each message type its own signature
 /// domain.
-pub trait IntentMessage: serde::Serialize {
+pub trait IntentMessage {
     const INTENT: Intent;
+
+    /// Return the BCS bytes of the message.
+    /// The trait has no `Serialize` bound, because Aeneas cannot translate the serde traits.
+    fn payload_bytes(&self) -> Vec<u8>;
+}
+
+/// Return the BCS bytes of `value`. Use it to write `payload_bytes`.
+pub fn bcs_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    bcs::to_bytes(value).expect("serialization should not fail")
 }
 
 impl<T: IntentMessage> IntentMessage for &T {
     const INTENT: Intent = T::INTENT;
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        (**self).payload_bytes()
+    }
 }
 
 #[cfg(test)]
