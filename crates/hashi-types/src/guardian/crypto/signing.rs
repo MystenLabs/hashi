@@ -56,12 +56,8 @@ pub enum GuardianSigningIntentType {
 }
 
 /// Guardian-signed payloads and their intent-based domain separation.
-pub trait GuardianSigningIntent {
+pub trait GuardianSigningIntent: Serialize {
     const INTENT: GuardianSigningIntentType;
-
-    /// Return the BCS bytes of the payload.
-    /// The trait has no `Serialize` bound, because Aeneas cannot translate the serde traits.
-    fn payload_bytes(&self) -> Vec<u8>;
 }
 
 /// All possible KP signing intent types.
@@ -121,51 +117,27 @@ pub struct GuardianSigned<T> {
 
 impl GuardianSigningIntent for LogEntry {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogEntry;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 impl GuardianSigningIntent for GuardianResponse<SetupNewKeyResponse> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::SetupNewKeyResponse;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 impl GuardianSigningIntent for GuardianResponse<StandardWithdrawalResponse> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::StandardWithdrawalResponse;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 impl GuardianSigningIntent for GuardianResponse<GuardianInfo> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::GuardianInfo;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 impl GuardianSigningIntent for GuardianResponse<RotateKpSetResponse> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpSetResponse;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
     const INTENT: GuardianSigningIntentType =
         GuardianSigningIntentType::ProvisionerRotateCertResponse;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 impl KpSigningIntent for CeremonyConfirmationRequest {
@@ -207,12 +179,7 @@ impl<T> GuardianSigned<T> {
     where
         T: GuardianSigningIntent,
     {
-        // BCS writes a tuple as its fields in sequence, and a `u8` as one byte.
-        let payload = data.payload_bytes();
-        let mut bytes = Vec::with_capacity(1 + payload.len());
-        bytes.push(T::INTENT as u8);
-        bytes.extend_from_slice(&payload);
-        bytes
+        bcs::to_bytes(&(T::INTENT as u8, data)).expect("serialization should not fail")
     }
 
     /// Sign a payload with intent-based domain separation.

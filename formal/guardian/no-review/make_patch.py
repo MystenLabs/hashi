@@ -4,7 +4,7 @@
 """Make `review/sync-copy.patch`, the patch that gives the sync copy of the withdrawal handler.
 
 Why it exists:
-Aeneas cannot translate an `async` function or the `tracing` macros.
+Aeneas cannot translate an `async` function, the `tracing` macros, or the `serde` traits.
 `review/extract.sh` applies the patch to a copy of the workspace before the translation.
 The patch is the file that a person reviews. This script only helps to write the patch.
 A change to the patch by hand is also correct.
@@ -24,6 +24,20 @@ from pathlib import Path
 HANDLER = "crates/hashi-guardian/src/withdraw_mode/standard_withdrawal.rs"
 ENCLAVE = "crates/hashi-guardian/src/enclave.rs"
 SERVICE = "crates/hashi-guardian/src/service.rs"
+INTENT = "crates/hashi-types/src/intent.rs"
+SIGNING = "crates/hashi-types/src/guardian/crypto/signing.rs"
+COMMITTEE = "crates/hashi-types/src/committee.rs"
+GUARDIAN_TYPES = "crates/hashi-types/src/guardian/mod.rs"
+MOVE_TYPES = "crates/hashi-types/src/move_types/mod.rs"
+
+# The method that each implementation of a signing trait gets in the copy.
+PAYLOAD_BYTES = (
+    "\n    fn payload_bytes(&self) -> Vec<u8> {\n"
+    "        crate::intent::bcs_bytes(self)\n"
+    "    }\n"
+)
+# An implementation of `IntentMessage` with only the `INTENT` constant.
+INTENT_IMPL = r"(impl (?:crate::intent::)?IntentMessage for \w+ \{\n    const INTENT: [^;]+;\n)(\})"
 
 # One rule: (file, regular expression, replacement, expected number of matches).
 # `None` as the expected number means "one or more".
@@ -63,12 +77,70 @@ RULES = [
         r"Box::pin(async move { \1 })",
         1,
     ),
+    # 5. The signing traits have no `Serialize` supertrait. A method gives the BCS bytes.
+    #    The signed bytes do not change: BCS writes a tuple as its fields in sequence.
+    (
+        INTENT,
+        r"pub trait IntentMessage: serde::Serialize \{\n(    const INTENT: Intent;\n)\}\n",
+        r"pub trait IntentMessage {\n\1\n"
+        r"    /// Return the BCS bytes of the message.\n"
+        r"    fn payload_bytes(&self) -> Vec<u8>;\n}\n\n"
+        r"/// Return the BCS bytes of `value`.\n"
+        r"pub fn bcs_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {\n"
+        r'    bcs::to_bytes(value).expect("serialization should not fail")\n}\n',
+        1,
+    ),
+    (
+        INTENT,
+        r"(impl<T: IntentMessage> IntentMessage for &T \{\n    const INTENT: Intent = T::INTENT;\n)(\})",
+        r"\1\n    fn payload_bytes(&self) -> Vec<u8> {\n        (**self).payload_bytes()\n    }\n\2",
+        1,
+    ),
+    (COMMITTEE, INTENT_IMPL, r"\1" + PAYLOAD_BYTES + r"\2", 1),
+    (GUARDIAN_TYPES, INTENT_IMPL, r"\1" + PAYLOAD_BYTES + r"\2", 2),
+    (MOVE_TYPES, INTENT_IMPL, r"\1" + PAYLOAD_BYTES + r"\2", 2),
+    (
+        COMMITTEE,
+        r"    bcs::to_bytes\(&\(T::INTENT\.as_u16\(\), hashi_id, epoch, message\)\)\.unwrap\(\)\n",
+        r"    let mut bytes = bcs::to_bytes(&(T::INTENT.as_u16(), hashi_id, epoch)).unwrap();\n"
+        r"    bytes.extend_from_slice(&message.payload_bytes());\n"
+        r"    bytes\n",
+        1,
+    ),
+    (
+        SIGNING,
+        r"pub trait GuardianSigningIntent: Serialize \{\n(    const INTENT: GuardianSigningIntentType;\n)\}",
+        r"pub trait GuardianSigningIntent {\n\1\n"
+        r"    /// Return the BCS bytes of the payload.\n"
+        r"    fn payload_bytes(&self) -> Vec<u8>;\n}",
+        1,
+    ),
+    (
+        SIGNING,
+        r"(impl GuardianSigningIntent for [^{]+\{\n    const INTENT: GuardianSigningIntentType =\s+"
+        r"GuardianSigningIntentType::\w+;\n)(\})",
+        r"\1" + PAYLOAD_BYTES + r"\2",
+        6,
+    ),
+    (
+        SIGNING,
+        r"(        T: GuardianSigningIntent,\n    \{\n)"
+        r'        bcs::to_bytes\(&\(T::INTENT as u8, data\)\)\.expect\("serialization should not fail"\)\n',
+        r"\1        let payload = data.payload_bytes();\n"
+        r"        let mut bytes = Vec::with_capacity(1 + payload.len());\n"
+        r"        bytes.push(T::INTENT as u8);\n"
+        r"        bytes.extend_from_slice(&payload);\n"
+        r"        bytes\n",
+        1,
+    ),
 ]
 
 TEST_MODULE = "\n#[cfg(test)]\nmod "
 PREAMBLE = """\
 This patch makes the sync copy of the Guardian withdrawal handler for the Lean extraction.
 `extract.sh` applies it to a copy of the workspace. It does not change the repository.
+The patch has three kinds of edits: `async` to sync with a mock S3 log, no `tracing` lines,
+and signing traits with a `payload_bytes` method in place of the `Serialize` supertrait.
 Review each line. `WithdrawalSpec.lean` gives the reasons why the copy has the same behaviour.
 `no-review/make_patch.py` can write this file again after a change to the Rust code.
 

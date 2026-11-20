@@ -914,10 +914,6 @@ pub struct ReconfigCompletionMessage {
 
 impl crate::intent::IntentMessage for ReconfigCompletionMessage {
     const INTENT: crate::intent::Intent = crate::intent::Intent::ReconfigCompletion;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 /// Rust version of the Move hashi::proposal::Proposal type.
@@ -1081,10 +1077,6 @@ pub struct PresigDealerSetMessage {
 
 impl crate::intent::IntentMessage for PresigDealerSetMessage {
     const INTENT: crate::intent::Intent = crate::intent::Intent::PresigDealerSet;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.

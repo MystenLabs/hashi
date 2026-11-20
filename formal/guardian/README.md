@@ -41,12 +41,14 @@ The exact statement is in `review/WithdrawalSpec.lean`.
 
 ## The sync copy
 
-Aeneas cannot translate an `async` function or the `tracing` macros.
+Aeneas cannot translate an `async` function, the `tracing` macros, or the `serde` traits.
 `extract.sh` copies the workspace and applies `sync-copy.patch` to the copy:
 
 - The handler becomes a sync function.
 - The log lines go away.
 - The S3 withdrawal log becomes a list in the enclave, `mock_withdrawal_log`.
+- The signing traits `IntentMessage` and `GuardianSigningIntent` get a `payload_bytes` method
+  in place of the `Serialize` supertrait. The signed bytes do not change.
 
 `extract.sh` stops if a line of the patch does not match the Rust code.
 Then run `python3 no-review/make_patch.py` and review the new patch.

@@ -217,10 +217,6 @@ pub struct StandardWithdrawalRequest {
 
 impl crate::intent::IntentMessage for StandardWithdrawalRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::GuardianWithdrawalRequest;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 /// `GuardianSignedResponse<StandardWithdrawalResponse>`.
@@ -239,10 +235,6 @@ pub struct CommitteeTransitionRequest {
 
 impl crate::intent::IntentMessage for CommitteeTransitionRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
-
-    fn payload_bytes(&self) -> Vec<u8> {
-        crate::intent::bcs_bytes(self)
-    }
 }
 
 /// `KpSigned<ProvisionerRotateCertRequest>`.

@@ -1,5 +1,7 @@
 This patch makes the sync copy of the Guardian withdrawal handler for the Lean extraction.
 `extract.sh` applies it to a copy of the workspace. It does not change the repository.
+The patch has three kinds of edits: `async` to sync with a mock S3 log, no `tracing` lines,
+and signing traits with a `payload_bytes` method in place of the `Serialize` supertrait.
 Review each line. `WithdrawalSpec.lean` gives the reasons why the copy has the same behaviour.
 `no-review/make_patch.py` can write this file again after a change to the Rust code.
 
@@ -119,3 +121,163 @@ Review each line. `WithdrawalSpec.lean` gives the reasons why the copy has the s
 -    );
      Ok(guardian.sign(response))
  }
+--- a/crates/hashi-types/src/committee.rs
++++ b/crates/hashi-types/src/committee.rs
+@@ -893,4 +893,8 @@
+ impl IntentMessage for ProofOfPossessionMessage {
+     const INTENT: Intent = Intent::ProofOfPossession;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+@@ -919,5 +923,7 @@
+     // so a certificate minted for another Hashi instance (byte-identical
+     // committee, same epoch) can never verify here.
+-    bcs::to_bytes(&(T::INTENT.as_u16(), hashi_id, epoch, message)).unwrap()
++    let mut bytes = bcs::to_bytes(&(T::INTENT.as_u16(), hashi_id, epoch)).unwrap();
++    bytes.extend_from_slice(&message.payload_bytes());
++    bytes
+ }
+ 
+--- a/crates/hashi-types/src/guardian/crypto/signing.rs
++++ b/crates/hashi-types/src/guardian/crypto/signing.rs
+@@ -57,6 +57,9 @@
+ 
+ /// Guardian-signed payloads and their intent-based domain separation.
+-pub trait GuardianSigningIntent: Serialize {
++pub trait GuardianSigningIntent {
+     const INTENT: GuardianSigningIntentType;
++
++    /// Return the BCS bytes of the payload.
++    fn payload_bytes(&self) -> Vec<u8>;
+ }
+ 
+@@ -118,20 +121,40 @@
+ impl GuardianSigningIntent for LogEntry {
+     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogEntry;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+ impl GuardianSigningIntent for GuardianResponse<SetupNewKeyResponse> {
+     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::SetupNewKeyResponse;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+ impl GuardianSigningIntent for GuardianResponse<StandardWithdrawalResponse> {
+     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::StandardWithdrawalResponse;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+ impl GuardianSigningIntent for GuardianResponse<GuardianInfo> {
+     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::GuardianInfo;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+ impl GuardianSigningIntent for GuardianResponse<RotateKpSetResponse> {
+     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpSetResponse;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+@@ -139,4 +162,8 @@
+     const INTENT: GuardianSigningIntentType =
+         GuardianSigningIntentType::ProvisionerRotateCertResponse;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+@@ -180,5 +207,9 @@
+         T: GuardianSigningIntent,
+     {
+-        bcs::to_bytes(&(T::INTENT as u8, data)).expect("serialization should not fail")
++        let payload = data.payload_bytes();
++        let mut bytes = Vec::with_capacity(1 + payload.len());
++        bytes.push(T::INTENT as u8);
++        bytes.extend_from_slice(&payload);
++        bytes
+     }
+ 
+--- a/crates/hashi-types/src/guardian/mod.rs
++++ b/crates/hashi-types/src/guardian/mod.rs
+@@ -218,4 +218,8 @@
+ impl crate::intent::IntentMessage for StandardWithdrawalRequest {
+     const INTENT: crate::intent::Intent = crate::intent::Intent::GuardianWithdrawalRequest;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+@@ -236,4 +240,8 @@
+ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
+     const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+--- a/crates/hashi-types/src/intent.rs
++++ b/crates/hashi-types/src/intent.rs
+@@ -85,10 +85,22 @@
+ /// into the signing preimage, giving each message type its own signature
+ /// domain.
+-pub trait IntentMessage: serde::Serialize {
++pub trait IntentMessage {
+     const INTENT: Intent;
++
++    /// Return the BCS bytes of the message.
++    fn payload_bytes(&self) -> Vec<u8>;
++}
++
++/// Return the BCS bytes of `value`.
++pub fn bcs_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
++    bcs::to_bytes(value).expect("serialization should not fail")
+ }
+ 
+ impl<T: IntentMessage> IntentMessage for &T {
+     const INTENT: Intent = T::INTENT;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        (**self).payload_bytes()
++    }
+ }
+ 
+--- a/crates/hashi-types/src/move_types/mod.rs
++++ b/crates/hashi-types/src/move_types/mod.rs
+@@ -915,4 +915,8 @@
+ impl crate::intent::IntentMessage for ReconfigCompletionMessage {
+     const INTENT: crate::intent::Intent = crate::intent::Intent::ReconfigCompletion;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 
+@@ -1078,4 +1082,8 @@
+ impl crate::intent::IntentMessage for PresigDealerSetMessage {
+     const INTENT: crate::intent::Intent = crate::intent::Intent::PresigDealerSet;
++
++    fn payload_bytes(&self) -> Vec<u8> {
++        crate::intent::bcs_bytes(self)
++    }
+ }
+ 

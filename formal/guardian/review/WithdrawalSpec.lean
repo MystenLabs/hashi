@@ -26,6 +26,10 @@ Assumptions:
 - The sync copy has the same behaviour as the `async` handler. The reasons:
   - `run_rpc` in `service.rs` runs each handler from start to end with the enclave lock.
   - The removed `tracing` lines have no effect on the result of the handler.
+  - The copy gives the two signing traits a `payload_bytes` method in place of the
+    `Serialize` supertrait, because Aeneas cannot translate the `serde` traits.
+    The signed bytes do not change: BCS writes a tuple as its fields in sequence.
+    The functions that make those bytes have no body in Lean.
   - `LogWriter::write` stops the enclave if an S3 write fails.
     `log_withdraw` returns an error only if the S3 logger is not set. The handler then panics.
     The copy has a list in the enclave in place of the S3 log. The list accepts each record.
