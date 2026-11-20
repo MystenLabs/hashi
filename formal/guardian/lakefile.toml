@@ -17,4 +17,4 @@ roots = ["WithdrawalSpec"]
 [[lean_lib]]
 name = "NoReview"
 srcDir = "no-review"
-roots = ["HashiGuardian", "LimiterProof", "LimiterSanity", "RequestProof", "WithdrawalProof"]
+roots = ["HashiGuardian"]
