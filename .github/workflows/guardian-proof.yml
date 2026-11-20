@@ -1,0 +1,130 @@
+name: Guardian Lean Proof
+
+# Checks the Lean proof in `formal/guardian` against the current Rust code.
+#
+# Why it exists:
+# The proof is about a Lean translation of the Rust withdrawal handler. A Rust
+# change can make the translation or the proof fail. This job shows that early.
+#
+# How it works:
+# 1. Download the Aeneas release. It has `charon`, `charon-driver`, and `aeneas`.
+# 2. Install the Rust toolchain that the release needs, and the Lean toolchain.
+# 3. Run `review/extract.sh`. It applies `sync-copy.patch` to a copy of the
+#    workspace and translates the copy to `no-review/HashiGuardian.lean`.
+# 4. Build the Lean project. Lean checks each proof.
+# 5. Fail if a proof uses `sorry`, or if an axiom report is absent.
+#
+# When the job fails:
+# - The patch does not apply: run `python3 no-review/make_patch.py` and review
+#   the new patch.
+# - The Lean build fails: a proof needs an update, or the statement is false for
+#   the new code. See `formal/guardian/README.md`.
+#
+# Keep `AENEAS_RELEASE` equal to the release in `formal/guardian/lakefile.toml`
+# and in `formal/guardian/README.md`.
+
+on:
+  pull_request:
+    paths:
+      - crates/hashi-guardian/**
+      - crates/hashi-types/**
+      - formal/guardian/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/guardian-proof.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/hashi-guardian/**
+      - crates/hashi-types/**
+      - formal/guardian/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/guardian-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  AENEAS_RELEASE: nightly-2026.11.19-8f4466d
+  # SHA-256 of `aeneas-linux-x86_64.tar.gz` in that release.
+  AENEAS_SHA256: 00d4e95028bc5e27c0b4c3195079a421a9ac68f3e3d92c5e6260871e827d0be6
+
+jobs:
+  proof:
+    runs-on: ubuntu-ghcloud
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download Aeneas and Charon
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aeneas"
+          curl -sSfL -o "$RUNNER_TEMP/aeneas.tar.gz" \
+            "https://github.com/AeneasVerif/aeneas/releases/download/${AENEAS_RELEASE}/aeneas-linux-x86_64.tar.gz"
+          echo "${AENEAS_SHA256}  $RUNNER_TEMP/aeneas.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/aeneas.tar.gz" -C "$RUNNER_TEMP/aeneas"
+          echo "CHARON=$RUNNER_TEMP/aeneas/charon" >> "$GITHUB_ENV"
+          echo "AENEAS=$RUNNER_TEMP/aeneas/aeneas" >> "$GITHUB_ENV"
+
+      - name: Install the Rust toolchain for Charon
+        # Charon uses the compiler version in the `rust-toolchain` file of the release.
+        run: |
+          set -euo pipefail
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$RUNNER_TEMP/aeneas/rust-toolchain")"
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal \
+            --component rustc-dev --component llvm-tools --component rust-src
+
+      - name: Install the Lean toolchain
+        # `elan` reads the Lean version from `formal/guardian/lean-toolchain`.
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Translate the Rust code to Lean
+        working-directory: formal/guardian
+        run: ./review/extract.sh
+
+      - name: Download the Lean libraries
+        # `lake exe cache get` downloads the compiled Mathlib files.
+        working-directory: formal/guardian
+        run: lake exe cache get
+
+      - name: Cache the compiled Aeneas Lean library
+        uses: actions/cache@v4
+        with:
+          path: formal/guardian/.lake/packages/aeneas/backends/lean/.lake/build
+          key: aeneas-lean-${{ runner.os }}-${{ hashFiles('formal/guardian/lake-manifest.json', 'formal/guardian/lean-toolchain') }}
+
+      - name: Build the proofs
+        working-directory: formal/guardian
+        run: |
+          set -euo pipefail
+          lake build 2>&1 | tee "$RUNNER_TEMP/lake-build.log"
+
+      - name: Check the axiom reports
+        # Each `#print axioms` line in `WithdrawalProof.lean` gives one report.
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/lake-build.log"
+          if grep -q -e "sorryAx" -e "declaration uses 'sorry'" "$log"; then
+            echo "::error::A proof uses sorry."
+            exit 1
+          fi
+          for theorem in withdrawal_outflow_bound accepted_call_signs; do
+            if ! grep -q "'$theorem' depends on axioms" "$log"; then
+              echo "::error::The axiom report of $theorem is absent."
+              exit 1
+            fi
+          done
