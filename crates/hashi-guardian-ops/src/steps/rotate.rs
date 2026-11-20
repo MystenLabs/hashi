@@ -1527,6 +1527,21 @@ mod tests {
     }
 
     #[test]
+    fn arms_another_build_across_a_format_difference_once_the_pair_is_reviewed() {
+        let mut run = Run::new();
+        run.on_next_build();
+        run.state.borrow_mut().format_changes =
+            vec!["crates/hashi-types/src/guardian/errors.rs".to_owned()];
+        // Slot a's build and the proxy's are both COMMIT, so one reviewed pair covers both checks.
+        run.env.push((
+            "GUARDIAN_FORMATS_REVIEWED".to_owned(),
+            format!("{}..{}", world::COMMIT, world::NEXT),
+        ));
+        ok(run.step(&["yes"], |ctx| arm(ctx, Slot::B)));
+        assert!(run.state.borrow().deployed.contains_key("b"));
+    }
+
+    #[test]
     fn switches_onto_another_build_only_with_the_same_configuration() {
         let run = Run::new();
         run.on_next_build();
