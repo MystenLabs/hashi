@@ -1,0 +1,22 @@
+diff --git a/packages/hashi/sources/core/proposal/types/update_config.move b/packages/hashi/sources/core/proposal/types/update_config.move
+index 14434305..fca90b19 100644
+--- a/packages/hashi/sources/core/proposal/types/update_config.move
++++ b/packages/hashi/sources/core/proposal/types/update_config.move
+@@ -45,7 +45,7 @@ public struct UpdateConfig has copy, drop, store {
+ // ~~~~~~~ Entry Functions ~~~~~~~
+ 
+ /// Private `entry`: see the visibility note in `hashi::proposal`.
+-entry fun propose(
++public entry fun propose(
+     hashi: &mut Hashi,
+     validator_address: address,
+     entries: VecMap<String, Value>,
+@@ -69,7 +69,7 @@ entry fun propose(
+ }
+ 
+ /// Private `entry`: see the visibility note in `hashi::proposal`.
+-entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
++public entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
+     let UpdateConfig { entries } = proposal::execute(hashi, proposal_id, clock);
+     assert_valid_entries(hashi, &entries);
+     let (keys, values) = entries.into_keys_values();

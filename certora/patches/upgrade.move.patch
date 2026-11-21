@@ -1,0 +1,13 @@
+diff --git a/packages/hashi/sources/core/proposal/types/upgrade.move b/packages/hashi/sources/core/proposal/types/upgrade.move
+index 28caaaa8..55bae87e 100644
+--- a/packages/hashi/sources/core/proposal/types/upgrade.move
++++ b/packages/hashi/sources/core/proposal/types/upgrade.move
+@@ -46,7 +46,7 @@ public struct PackageUpgraded has copy, drop {
+ // ~~~~~~~ Entry Functions ~~~~~~~
+ 
+ /// Private `entry`: see the visibility note in `hashi::proposal`.
+-entry fun propose(
++public entry fun propose(
+     hashi: &mut Hashi,
+     validator_address: address,
+     digest: vector<u8>,

@@ -1,0 +1,375 @@
+diff --git a/packages/hashi/sources/btc/withdrawal_queue.move b/packages/hashi/sources/btc/withdrawal_queue.move
+index e0084148..e82153dd 100644
+--- a/packages/hashi/sources/btc/withdrawal_queue.move
++++ b/packages/hashi/sources/btc/withdrawal_queue.move
+@@ -323,13 +323,13 @@ public(package) fun approve_withdrawal(
+ 
+ /// The committee certificate recorded at approval time, if any. Returns
+ /// `None` for requests that have not yet been through `approve_request`.
+-public(package) fun request_approval_cert(self: &WithdrawalRequest): Option<CommitteeSignature> {
++public fun request_approval_cert(self: &WithdrawalRequest): Option<CommitteeSignature> {
+     self.approval_cert
+ }
+ 
+ /// The clock timestamp at which the request was approved, if any. Returns
+ /// `None` for requests that have not yet been through `approve_request`.
+-public(package) fun request_approved_timestamp_ms(self: &WithdrawalRequest): Option<u64> {
++public fun request_approved_timestamp_ms(self: &WithdrawalRequest): Option<u64> {
+     self.approved_timestamp_ms
+ }
+ 
+@@ -363,19 +363,31 @@ public(package) fun commit_requests(
+     let mut total_btc = sui::balance::zero<BTC>();
+ 
+     withdrawal_txn.request_ids.do_ref!(|id| {
+-        let request: &mut WithdrawalRequest = self.requests.borrow_mut(*id);
+-        assert!(request.is_approved(), ERequestNotApproved);
+-        // The link doubles as the drained marker: a second commit would pay
+-        // the user's Bitcoin output again without burning any BTC.
+-        assert!(!request.is_committed(), ERequestAlreadyCommitted);
+-
+-        total_btc.join(request.btc.withdraw_all());
+-        request.withdrawal_txn_id = option::some(withdrawal_txn_id);
++        total_btc.join(self.commit_request(withdrawal_txn_id, *id));
+     });
+ 
+     total_btc
+ }
+ 
++/// The loop body of `commit_requests`, for one request. Split out so a spec
++/// summary can apply it to a single tracked request — see
++/// `withdraw::summaries_utxo_pool::commit_requests_summary`.
++public fun commit_request(
++    self: &mut WithdrawalRequestQueue,
++    withdrawal_txn_id: address,
++    id: address,
++): Balance<BTC> {
++    let request: &mut WithdrawalRequest = self.requests.borrow_mut(id);
++    assert!(request.is_approved(), ERequestNotApproved);
++    // The link doubles as the drained marker: a second commit would pay
++    // the user's Bitcoin output again without burning any BTC.
++    assert!(!request.is_committed(), ERequestAlreadyCommitted);
++
++    let btc = request.btc.withdraw_all();
++    request.withdrawal_txn_id = option::some(withdrawal_txn_id);
++    btc
++}
++
+ /// Cancel a withdrawal: drain BTC, clean up user index, destroy the request.
+ /// Cancelled requests are not persisted — they have no useful terminal state.
+ /// Caller must verify sender and cooldown before calling.
+@@ -406,19 +418,41 @@ public(package) fun cancel_withdrawal(
+     btc
+ }
+ 
++/// Check if an active request exists in the requests bag. There is no
++/// non-aborting membership check otherwise — `borrow_request` aborts on a
++/// missing key. Mirrors `contains_withdrawal_txn` on the transaction side.
++public fun contains_request(self: &WithdrawalRequestQueue, request_id: address): bool {
++    self.requests.contains(request_id)
++}
++
+ /// Borrow an active request from the requests bag (for sender/timestamp checks).
+-public(package) fun borrow_request(
++public fun borrow_request(
+     self: &WithdrawalRequestQueue,
+     request_id: address,
+ ): &WithdrawalRequest {
+     self.requests.borrow(request_id)
+ }
+ 
++/// Check if an archived request exists in the processed bag. The `processed`
++/// counterpart of `contains_request`.
++public fun contains_processed(self: &WithdrawalRequestQueue, request_id: address): bool {
++    self.processed.contains(request_id)
++}
++
++/// Borrow an archived request from the processed bag. The `processed`
++/// counterpart of `borrow_request`, which only ever reads `requests`.
++public fun borrow_processed(
++    self: &WithdrawalRequestQueue,
++    request_id: address,
++): &WithdrawalRequest {
++    self.processed.borrow(request_id)
++}
++
+ /// Check if a request has already been committed to a WithdrawalTransaction.
+ /// Link-first: a committed request stays in `requests` until archival, so
+ /// its `withdrawal_txn_id` is the authority; the `processed` fallback covers
+ /// archived requests.
+-public(package) fun is_request_processing(
++public fun is_request_processing(
+     self: &WithdrawalRequestQueue,
+     request_id: address,
+ ): bool {
+@@ -430,6 +464,18 @@ public(package) fun is_request_processing(
+     }
+ }
+ 
++/// Borrow the active-requests `ObjectBag` itself (not an entry in it) —
++/// lets spec code compare its identity (`sui::object::id`) against
++/// `processed_ref`'s. See `withdrawal_txns_ref` for why that matters.
++public fun requests_ref(self: &WithdrawalRequestQueue): &ObjectBag {
++    &self.requests
++}
++
++/// Borrow the processed-requests `ObjectBag` itself. See `requests_ref`.
++public fun processed_ref(self: &WithdrawalRequestQueue): &ObjectBag {
++    &self.processed
++}
++
+ // === Transaction Lifecycle ===
+ 
+ public(package) fun new_withdrawal_txn(
+@@ -447,15 +493,9 @@ public(package) fun new_withdrawal_txn(
+ ): WithdrawalTransaction {
+     let max_network_fee = config.worst_case_network_fee();
+ 
+-    let mut input_amount = 0;
+-    inputs.do_ref!(|utxo| {
+-        input_amount = input_amount + utxo.amount();
+-    });
++    let input_amount = sum_input_amounts(&inputs);
+ 
+-    let mut output_amount = 0;
+-    outputs.do_ref!(|utxo| {
+-        output_amount = output_amount + utxo.amount;
+-    });
++    let output_amount = sum_output_amounts(&outputs);
+ 
+     assert!(input_amount >= output_amount, EInputsBelowOutputs);
+     let miner_fee = input_amount - output_amount;
+@@ -463,8 +503,8 @@ public(package) fun new_withdrawal_txn(
+     // Outputs are one-per-request followed by zero or more trailing change
+     // outputs. The per-request outputs occupy indices `[0, request_count)`;
+     // any remaining outputs are change back to the bridge.
+-    let request_count = request_ids.length();
+-    let output_count = outputs.length();
++    let request_count = count_requests(&request_ids);
++    let output_count = count_outputs(&outputs);
+     assert!(output_count >= request_count, EOutputCountMismatch);
+     // Vouts are u32 (change-output UTXO ids are derived from output indices);
+     // unreachable for real Bitcoin transactions, but make the cast explicit.
+@@ -477,20 +517,7 @@ public(package) fun new_withdrawal_txn(
+ 
+     // Each withdrawal output must match the expected amount after deducting
+     // the per-user miner fee.
+-    request_count.do!(|i| {
+-        let info = request_infos.borrow(i);
+-        let output = outputs.borrow(i);
+-        // Checked before subtracting, so a request smaller than its fee share
+-        // aborts with the dust error instead of underflowing. The sum cannot
+-        // overflow: the fee is capped at the withdrawal minimum less dust.
+-        assert!(
+-            info.btc_amount >= per_user_miner_fee + hashi::btc_config::dust_relay_min_value(),
+-            EOutputBelowDust,
+-        );
+-        let expected = info.btc_amount - per_user_miner_fee;
+-        assert!(output.amount == expected, EOutputAmountMismatch);
+-        assert!(output.bitcoin_address == info.bitcoin_address, EOutputAddressMismatch);
+-    });
++    check_withdrawal_outputs(request_count, request_infos, &outputs, per_user_miner_fee);
+ 
+     // Change output destinations are not validated on chain; the commitment
+     // certificate binds the full output list.
+@@ -529,13 +556,22 @@ public(package) fun insert_withdrawal_txn(
+     self.withdrawal_txns.add(txn.id.to_address(), txn)
+ }
+ 
+-public(package) fun borrow_withdrawal_txn(
++public fun borrow_withdrawal_txn(
+     self: &WithdrawalRequestQueue,
+     withdrawal_id: address,
+ ): &WithdrawalTransaction {
+     self.withdrawal_txns.borrow(withdrawal_id)
+ }
+ 
++/// Borrow an archived transaction from the confirmed_txns bag. The
++/// `confirmed_txns` counterpart of `borrow_withdrawal_txn`.
++public fun borrow_confirmed_txn(
++    self: &WithdrawalRequestQueue,
++    withdrawal_id: address,
++): &WithdrawalTransaction {
++    self.confirmed_txns.borrow(withdrawal_id)
++}
++
+ public(package) fun remove_withdrawal_txn(
+     self: &mut WithdrawalRequestQueue,
+     withdrawal_id: address,
+@@ -551,6 +587,38 @@ public(package) fun insert_confirmed_txn(
+     self.confirmed_txns.add(txn.id.to_address(), txn);
+ }
+ 
++/// Check if an in-flight withdrawal transaction exists (inserted by
++/// `insert_withdrawal_txn`, removed by `remove_withdrawal_txn`). There is
++/// no non-aborting membership check otherwise — `borrow_withdrawal_txn`
++/// aborts on a missing key.
++public fun contains_withdrawal_txn(self: &WithdrawalRequestQueue, withdrawal_id: address): bool {
++    self.withdrawal_txns.contains(withdrawal_id)
++}
++
++/// Check if a withdrawal transaction has been confirmed (moved to the cold
++/// bag by `insert_confirmed_txn`). Nothing ever removes from
++/// `confirmed_txns`, so this is a latch.
++public fun contains_confirmed_txn(self: &WithdrawalRequestQueue, withdrawal_id: address): bool {
++    self.confirmed_txns.contains(withdrawal_id)
++}
++
++/// Borrow the in-flight-transactions `ObjectBag` itself (not an entry in
++/// it) — lets spec code compare its identity (`sui::object::id`) against
++/// `confirmed_txns_ref`'s, since they're two distinct objects in any
++/// reachable state (each gets its own fresh UID from
++/// `withdrawal_queue::create`), a fact a fully-nondet
++/// `WithdrawalRequestQueue` doesn't otherwise encode. Mirrors
++/// `deposit_queue::requests_ref`.
++public fun withdrawal_txns_ref(self: &WithdrawalRequestQueue): &ObjectBag {
++    &self.withdrawal_txns
++}
++
++/// Borrow the confirmed-transactions `ObjectBag` itself. See
++/// `withdrawal_txns_ref`.
++public fun confirmed_txns_ref(self: &WithdrawalRequestQueue): &ObjectBag {
++    &self.confirmed_txns
++}
++
+ /// Record a chunk of completed per-input MPC signatures into the batch
+ /// (out-of-order, first-writer-wins). Caller must cert-gate the write.
+ public(package) fun record_input_signatures(
+@@ -798,14 +866,26 @@ public(package) fun change_utxo_ids(self: &WithdrawalTransaction): vector<UtxoId
+ 
+ // === Accessors ===
+ 
+-public(package) fun withdrawal_txn_id(self: &WithdrawalTransaction): address {
++public fun withdrawal_txn_id(self: &WithdrawalTransaction): address {
+     self.id.to_address()
+ }
+ 
+-public(package) fun withdrawal_txn_request_ids(self: &WithdrawalTransaction): &vector<address> {
++public fun withdrawal_txn_request_ids(self: &WithdrawalTransaction): &vector<address> {
+     &self.request_ids
+ }
+ 
++public fun withdrawal_txn_signed_timestamp_ms(self: &WithdrawalTransaction): Option<u64> {
++    self.signed_timestamp_ms
++}
++
++public fun withdrawal_txn_confirmed_timestamp_ms(self: &WithdrawalTransaction): Option<u64> {
++    self.confirmed_timestamp_ms
++}
++
++public fun withdrawal_txn_has_guardian_signatures(self: &WithdrawalTransaction): bool {
++    self.guardian_signatures.is_some()
++}
++
+ public(package) fun txid(self: &WithdrawalTransaction): address {
+     self.txid
+ }
+@@ -814,7 +894,7 @@ public(package) fun withdrawal_txn_inputs(self: &WithdrawalTransaction): &vector
+     &self.inputs
+ }
+ 
+-public(package) fun request_id(self: &WithdrawalRequest): ID {
++public fun request_id(self: &WithdrawalRequest): ID {
+     self.id.to_inner()
+ }
+ 
+@@ -826,7 +906,7 @@ public(package) fun request_created_timestamp_ms(self: &WithdrawalRequest): u64
+     self.created_timestamp_ms
+ }
+ 
+-public(package) fun request_btc_amount(self: &WithdrawalRequest): u64 {
++public fun request_btc_amount(self: &WithdrawalRequest): u64 {
+     self.btc_amount
+ }
+ 
+@@ -835,19 +915,19 @@ public(package) fun request_bitcoin_address(self: &WithdrawalRequest): &vector<u
+ }
+ 
+ /// The withdrawal transaction this request was committed into, if any.
+-public(package) fun request_withdrawal_txn_id(self: &WithdrawalRequest): Option<address> {
++public fun request_withdrawal_txn_id(self: &WithdrawalRequest): Option<address> {
+     self.withdrawal_txn_id
+ }
+ 
+ /// The committee has recorded an approval cert. Stays true after commitment;
+ /// pair with `is_committed` to find requests still awaiting commitment.
+-public(package) fun is_approved(self: &WithdrawalRequest): bool {
++public fun is_approved(self: &WithdrawalRequest): bool {
+     self.approval_cert.is_some()
+ }
+ 
+ /// Committed into a withdrawal transaction: the BTC is drained and the
+ /// request can no longer be approved or cancelled.
+-public(package) fun is_committed(self: &WithdrawalRequest): bool {
++public fun is_committed(self: &WithdrawalRequest): bool {
+     self.withdrawal_txn_id.is_some()
+ }
+ 
+@@ -920,6 +1000,67 @@ fun txn_fully_signed(txn: &WithdrawalTransaction): bool {
+     txn.signing.is_complete() && txn.guardian_signatures.is_some()
+ }
+ 
++/// Sum of `utxo.amount()` across `inputs`. Split out of `new_withdrawal_txn`
++/// so it can be summarized as a single unit — see
++/// `solvency::summaries_utxo_pool::sum_input_amounts_summary`.
++fun sum_input_amounts(inputs: &vector<Utxo>): u64 {
++    let mut input_amount = 0;
++    inputs.do_ref!(|utxo| {
++        input_amount = input_amount + utxo.amount();
++    });
++    input_amount
++}
++
++/// Sum of `utxo.amount` across `outputs`. Split out of `new_withdrawal_txn`
++/// so it can be summarized as a single unit — see
++/// `solvency::summaries_utxo_pool::sum_output_amounts_summary`.
++fun sum_output_amounts(outputs: &vector<OutputUtxo>): u64 {
++    let mut output_amount = 0;
++    outputs.do_ref!(|utxo| {
++        output_amount = output_amount + utxo.amount;
++    });
++    output_amount
++}
++
++/// Split out of `new_withdrawal_txn` so it can be summarized as a single
++/// unit — see `solvency::summaries_utxo_pool::count_requests_summary`.
++fun count_requests(request_ids: &vector<address>): u64 {
++    request_ids.length()
++}
++
++/// Split out of `new_withdrawal_txn` so it can be summarized as a single
++/// unit — see `solvency::summaries_utxo_pool::count_outputs_summary`.
++fun count_outputs(outputs: &vector<OutputUtxo>): u64 {
++    outputs.length()
++}
++
++/// Each withdrawal output must match its request's amount after deducting
++/// the per-user miner fee, at or above the dust floor, to the request's
++/// destination address. Split out of `new_withdrawal_txn` so it can be
++/// summarized as a single unit — see
++/// `solvency::summaries_utxo_pool::check_withdrawal_outputs_summary`.
++fun check_withdrawal_outputs(
++    request_count: u64,
++    request_infos: &vector<CommittedRequestInfo>,
++    outputs: &vector<OutputUtxo>,
++    per_user_miner_fee: u64,
++) {
++    request_count.do!(|i| {
++        let info = request_infos.borrow(i);
++        let output = outputs.borrow(i);
++        // Checked before subtracting, so a request smaller than its fee share
++        // aborts with the dust error instead of underflowing. The sum cannot
++        // overflow: the fee is capped at the withdrawal minimum less dust.
++        assert!(
++            info.btc_amount >= per_user_miner_fee + hashi::btc_config::dust_relay_min_value(),
++            EOutputBelowDust,
++        );
++        let expected = info.btc_amount - per_user_miner_fee;
++        assert!(output.amount == expected, EOutputAmountMismatch);
++        assert!(output.bitcoin_address == info.bitcoin_address, EOutputAddressMismatch);
++    });
++}
++
+ // ~~~~~~~ Test Helpers ~~~~~~~
+ 
+ #[test_only]

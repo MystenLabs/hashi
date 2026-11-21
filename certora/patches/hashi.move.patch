@@ -1,0 +1,63 @@
+diff --git a/packages/hashi/sources/hashi.move b/packages/hashi/sources/hashi.move
+index 780851c9..bb0aa94a 100644
+--- a/packages/hashi/sources/hashi.move
++++ b/packages/hashi/sources/hashi.move
+@@ -169,7 +169,7 @@ public(package) fun id(self: &Hashi): &UID {
+     &self.id
+ }
+ 
+-public(package) fun config(self: &Hashi): &Config {
++public fun config(self: &Hashi): &Config {
+     &self.config
+ }
+ 
+@@ -185,7 +185,7 @@ public(package) fun epoch_config_mut(self: &mut Hashi): &mut Config {
+     &mut self.epoch_config
+ }
+ 
+-public(package) fun versioning(self: &Hashi): &Versioning {
++public fun versioning(self: &Hashi): &Versioning {
+     &self.versioning
+ }
+ 
+@@ -193,11 +193,11 @@ public(package) fun versioning_mut(self: &mut Hashi): &mut Versioning {
+     &mut self.versioning
+ }
+ 
+-public(package) fun treasury(self: &Hashi): &Treasury {
++public fun treasury(self: &Hashi): &Treasury {
+     &self.treasury
+ }
+ 
+-public(package) fun committee_set(self: &Hashi): &CommitteeSet {
++public fun committee_set(self: &Hashi): &CommitteeSet {
+     &self.committee_set
+ }
+ 
+@@ -205,7 +205,7 @@ public(package) fun committee_set_mut(self: &mut Hashi): &mut CommitteeSet {
+     &mut self.committee_set
+ }
+ 
+-public(package) fun current_committee(self: &Hashi): &Committee {
++public fun current_committee(self: &Hashi): &Committee {
+     self.committee_set.current_committee()
+ }
+ 
+@@ -213,7 +213,7 @@ public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {
+     &mut self.treasury
+ }
+ 
+-public(package) fun proposals(self: &Hashi): &Proposals {
++public fun proposals(self: &Hashi): &Proposals {
+     &self.proposals
+ }
+ 
+@@ -221,7 +221,7 @@ public(package) fun proposals_mut(self: &mut Hashi): &mut Proposals {
+     &mut self.proposals
+ }
+ 
+-public(package) fun bitcoin(self: &Hashi): &BitcoinState {
++public fun bitcoin(self: &Hashi): &BitcoinState {
+     df::borrow(&self.id, bitcoin_state::key())
+ }
+ 

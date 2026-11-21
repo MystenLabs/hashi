@@ -1,0 +1,19 @@
+diff --git a/packages/hashi/sources/core/treasury.move b/packages/hashi/sources/core/treasury.move
+index a921fe58..cc8e745c 100644
+--- a/packages/hashi/sources/core/treasury.move
++++ b/packages/hashi/sources/core/treasury.move
+@@ -63,6 +63,14 @@ public(package) fun burn<T>(self: &mut Treasury, balance: Balance<T>) {
+     self.treasury_cap<T>().supply_mut().decrease_supply(balance);
+ }
+ 
++/// Read-only access to a registered coin's `TreasuryCap`. Unlike
++/// `treasury_cap`, this hands out `&TreasuryCap<T>` rather than
++/// `&mut TreasuryCap<T>`, so it can't be used to mint or burn — only to
++/// call read-only methods like `sui::coin::total_supply`.
++public fun treasury_cap_ref<T>(self: &Treasury): &TreasuryCap<T> {
++    &self.objects[Key<TreasuryCap<T>> {}]
++}
++
+ // ~~~~~~~ Private Functions ~~~~~~~
+ 
+ fun treasury_cap<T>(self: &mut Treasury): &mut TreasuryCap<T> {

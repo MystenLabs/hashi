@@ -1,0 +1,28 @@
+diff --git a/packages/hashi/sources/core/committee/committee.move b/packages/hashi/sources/core/committee/committee.move
+index cabc14a3..bc3b294f 100644
+--- a/packages/hashi/sources/core/committee/committee.move
++++ b/packages/hashi/sources/core/committee/committee.move
+@@ -141,12 +141,12 @@ public(package) fun validator_address(self: &CommitteeMember): address {
+ // === Accessors for Committee ===
+ 
+ /// Get the epoch of the committee.
+-public(package) fun epoch(self: &Committee): u64 {
++public fun epoch(self: &Committee): u64 {
+     self.epoch
+ }
+ 
+ /// Returns the number of total_weight held by the committee.
+-public(package) fun total_weight(self: &Committee): u64 {
++public fun total_weight(self: &Committee): u64 {
+     self.total_weight
+ }
+ 
+@@ -275,7 +275,7 @@ public(package) fun verify_certificate<T>(
+ // === Accessors for CommitteeSignature ===
+ 
+ /// The epoch in which the certificate was produced.
+-public(package) fun signature_epoch(self: &CommitteeSignature): u64 {
++public fun signature_epoch(self: &CommitteeSignature): u64 {
+     self.epoch
+ }
+ 

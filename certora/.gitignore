@@ -1,0 +1,6 @@
+# certora
+.certora_internal
+.venv/
+emv-*/
+build/
+package_summaries/

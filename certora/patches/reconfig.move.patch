@@ -1,0 +1,13 @@
+diff --git a/packages/hashi/sources/core/reconfig.move b/packages/hashi/sources/core/reconfig.move
+index 3be9dc5e..4b69dbe1 100644
+--- a/packages/hashi/sources/core/reconfig.move
++++ b/packages/hashi/sources/core/reconfig.move
+@@ -56,7 +56,7 @@ public struct ReconfigEnded has copy, drop {
+ 
+ // ~~~~~~~ Entry Functions ~~~~~~~
+ 
+-entry fun start_reconfig(
++public entry fun start_reconfig(
+     self: &mut Hashi,
+     sui_system: &sui_system::sui_system::SuiSystemState,
+     ctx: &TxContext,

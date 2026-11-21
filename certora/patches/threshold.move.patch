@@ -1,0 +1,13 @@
+diff --git a/packages/hashi/sources/core/threshold.move b/packages/hashi/sources/core/threshold.move
+index b11c793e..b8c8f082 100644
+--- a/packages/hashi/sources/core/threshold.move
++++ b/packages/hashi/sources/core/threshold.move
+@@ -32,7 +32,7 @@ public(package) fun certificate_threshold(total_weight: u16): u16 {
+ /// Returns the minimum weight required to meet a threshold expressed
+ /// in basis points (0..10000). Uses ceiling division so the required
+ /// weight is never less than the true fractional threshold.
+-public(package) fun weight_threshold(total_weight: u64, threshold_bps: u64): u64 {
++public fun weight_threshold(total_weight: u64, threshold_bps: u64): u64 {
+     assert!(threshold_bps <= MAX_BPS, EThresholdBpsTooHigh);
+     (total_weight * threshold_bps).divide_and_round_up(MAX_BPS)
+ }

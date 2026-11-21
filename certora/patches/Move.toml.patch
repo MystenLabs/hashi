@@ -1,0 +1,15 @@
+diff --git a/packages/hashi/Move.toml b/packages/hashi/Move.toml
+index 29c94ed2..06dac29c 100644
+--- a/packages/hashi/Move.toml
++++ b/packages/hashi/Move.toml
+@@ -5,4 +5,9 @@ edition = "2024.beta"
+ # authors = ["..."]      # e.g., ["Joe Smith (joesmith@noemail.com)", "John Snow (johnsnow@noemail.com)"]
+ 
+ [dependencies]
+-sui_system = { system = "sui_system" }
++MoveStdlib = { override = true, git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "framework/testnet" }
++Sui = { override = true, git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
++SuiSystem = { override = true, git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-system", rev = "framework/testnet" }
++
++[addresses]
++hashi = "0x0"

@@ -1,0 +1,136 @@
+diff --git a/packages/hashi/sources/btc/utxo_pool.move b/packages/hashi/sources/btc/utxo_pool.move
+index 91f5f8af..4f052fc7 100644
+--- a/packages/hashi/sources/btc/utxo_pool.move
++++ b/packages/hashi/sources/btc/utxo_pool.move
+@@ -56,7 +56,7 @@ public struct UtxoSpent has copy, drop {
+ 
+ // ~~~~~~~ Package Functions ~~~~~~~
+ 
+-public(package) fun create(ctx: &mut TxContext): UtxoPool {
++public fun create(ctx: &mut TxContext): UtxoPool {
+     UtxoPool {
+         utxo_records: sui::bag::new(ctx),
+         spent_utxos: sui::bag::new(ctx),
+@@ -64,7 +64,7 @@ public(package) fun create(ctx: &mut TxContext): UtxoPool {
+ }
+ 
+ /// Insert a confirmed UTXO (from a deposit) into the pool.
+-public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
++public fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
+     let utxo_id = utxo.id();
+     self.assert_not_spent_or_active(utxo_id);
+     self
+@@ -90,7 +90,7 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
+ /// observed on Bitcoin, so this insert carries the same replay guard as
+ /// `insert_active`: an outpoint that is live or already spent is refused
+ /// before any record is written.
+-public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_id: address) {
++public fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_id: address) {
+     let utxo_id = utxo.id();
+     self.assert_not_spent_or_active(utxo_id);
+     self
+@@ -116,19 +116,19 @@ public(package) fun assert_not_spent_or_active(self: &UtxoPool, utxo_id: UtxoId)
+ }
+ 
+ /// Return a copy of a UTXO from the pool.
+-public(package) fun get_utxo(self: &UtxoPool, utxo_id: UtxoId): hashi::utxo::Utxo {
++public fun get_utxo(self: &UtxoPool, utxo_id: UtxoId): hashi::utxo::Utxo {
+     let record: &UtxoRecord = self.utxo_records.borrow(utxo_id);
+     record.utxo
+ }
+ 
+ /// Lock a UTXO for use in a pending withdrawal. Aborts if already locked.
+-public(package) fun lock(self: &mut UtxoPool, utxo_id: UtxoId, withdrawal_id: address) {
++public fun lock(self: &mut UtxoPool, utxo_id: UtxoId, withdrawal_id: address) {
+     let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
+     assert!(record.spent_by.is_none(), EUtxoAlreadyLocked);
+     record.spent_by = option::some(withdrawal_id);
+ }
+ 
+-public(package) fun mark_spent(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64) {
++public fun mark_spent(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64) {
+     let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
+     record.spent_epoch = option::some(epoch);
+     sui::event::emit(UtxoSpent { utxo_id, spent_epoch: epoch });
+@@ -148,7 +148,7 @@ public(package) fun confirm_pending(self: &mut UtxoPool, utxo_id: UtxoId) {
+ /// Deferred bookkeeping for a spent UTXO: remove from `utxo_records` and
+ /// record in `spent_utxos`. Aborts if the UTXO has not been marked spent.
+ /// No-ops if the record has already been cleaned up.
+-public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
++public fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
+     if (self.utxo_records.contains(utxo_id)) {
+         let UtxoRecord { utxo, produced_by: _, spent_by: _, spent_epoch } = self
+             .utxo_records
+@@ -162,11 +162,70 @@ public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
+ // ~~~~~~~ Test Helpers ~~~~~~~
+ 
+ #[test_only]
+-public(package) fun has_active_record(self: &UtxoPool, utxo_id: UtxoId): bool {
++public fun has_active_record(self: &UtxoPool, utxo_id: UtxoId): bool {
+     self.utxo_records.contains(utxo_id)
+ }
+ 
+ #[test_only]
+-public(package) fun has_spent_record(self: &UtxoPool, utxo_id: UtxoId): bool {
++public fun has_spent_record(self: &UtxoPool, utxo_id: UtxoId): bool {
+     self.spent_utxos.contains(utxo_id)
+ }
++
++// The three functions below reproduce the exact bodies of `insert_active`,
++// `insert_pending`, and `lock` under different names, for cvlm summaries
++// (certora/specs/solvency) of those three real functions to call: a summary
++// of `insert_active` that itself called `insert_active` would recurse into
++// its own summary, since summarization replaces every call site of the
++// named function program-wide.
++//
++// SOUNDNESS: each function below must be kept byte-for-byte in sync with
++// the real function it duplicates. If `insert_active`, `insert_pending`, or
++// `lock`'s body ever changes, update the matching function here *and* its
++// caller in `certora/specs/solvency/sources/summaries_utxo_pool.move` —
++// otherwise the summary diverges from production behavior.
++public fun insert_active_reimpl(self: &mut UtxoPool, utxo: Utxo) {
++    let utxo_id = utxo.id();
++    self.assert_not_spent_or_active(utxo_id);
++    self
++        .utxo_records
++        .add(
++            utxo_id,
++            UtxoRecord {
++                utxo,
++                produced_by: option::none(),
++                spent_by: option::none(),
++                spent_epoch: option::none(),
++            },
++        )
++}
++
++public fun insert_pending_reimpl(self: &mut UtxoPool, utxo: Utxo, withdrawal_id: address) {
++    let utxo_id = utxo.id();
++    self.assert_not_spent_or_active(utxo_id);
++    self
++        .utxo_records
++        .add(
++            utxo_id,
++            UtxoRecord {
++                utxo,
++                produced_by: option::some(withdrawal_id),
++                spent_by: option::none(),
++                spent_epoch: option::none(),
++            },
++        )
++}
++
++public fun lock_reimpl(self: &mut UtxoPool, utxo_id: UtxoId, withdrawal_id: address) {
++    let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
++    assert!(record.spent_by.is_none(), EUtxoAlreadyLocked);
++    record.spent_by = option::some(withdrawal_id);
++}
++
++public fun get_utxo_record_spent_by(self: &UtxoPool, utxo_id: UtxoId): Option<address> {
++    if (self.utxo_records.contains(utxo_id)) {
++        let record: &UtxoRecord = self.utxo_records.borrow(utxo_id);
++        record.spent_by
++    } else {
++        option::none()
++    }
++}
