@@ -7,13 +7,14 @@ For the handler, Aeneas translates a sync copy that a script makes. See "The syn
 ## What it proves
 
 Start from any enclave. Make any list of calls to the handler `standard_withdrawal`.
-If each Guardian clock value is in `[a, b]`, then:
+Take any window `[a, b]` of Guardian clock values. Then:
 
-- `WithdrawalOutflowBound`: the outflow of the accepted calls is at most `max_bucket_capacity`
-  plus `refill_rate` × (`b - a` + 2100 seconds).
+- `WithdrawalOutflowBound`: the outflow of the accepted calls with a clock value in the window
+  is at most `max_bucket_capacity` plus `refill_rate` × (`b - a` + 2100 seconds).
+  The list can also have calls with a clock value out of the window.
   The outflow of one call is `wireOutflow`: the input amounts minus the internal output amounts.
   Lean computes it from the request as the caller sends it, with no Rust function.
-  With no limiter in the enclave, the outflow of the accepted calls is 0.
+  With no limiter in the enclave, that outflow is 0.
 
 The 2100 seconds is `MAX_CLOCK_SKEW_SECS + MAX_REQUEST_AGE_SECS`.
 The exact statement is in `review/WithdrawalSpec.lean`.
@@ -96,8 +97,9 @@ Lean models each such function as a pure function. The proof holds for each such
   such a function has no effect other than its return value.
 - Restarts. The bound is for one enclave session. The proof does not show that a new
   session starts from the last logged limiter state.
-- The Guardian clock. `a` and `b` bound the clock readings, not real time. A clock that
-  jumps forward makes `b - a` larger, and thus the bound larger.
+- The Guardian clock. The window `[a, b]` is a range of clock values, not of real time.
+  A real-time interval with a clock jump of `d` seconds is a window that is `d` seconds
+  longer. Its bound is larger by `d` × `refill_rate`.
 - A sanity example for the handler. Many functions that the handler calls have no body in
   Lean, so Lean cannot run an accepted call.
 - The correctness of Charon, Aeneas, and Lean.

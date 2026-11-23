@@ -62,7 +62,7 @@ Scope notes:
   A new session has a new limiter.
 - The statement is about the signatures of the Guardian only. After
   `HASHI_MPC_RECOVERY_DELAY_SECONDS`, the committee key can spend a pool UTXO alone.
-- `a` and `b` bound the Guardian clock readings, not real time.
+- The window `[a, b]` is a range of Guardian clock values, not of real time.
 - The statement is about a run with no panic. For a run with a panic, it applies to the
   calls before the panic. A call that does not return is the same case.
   The statement does not count the call that panics. That call gives no response, but its
@@ -137,33 +137,38 @@ def wireOutflow (wire : guardian.SignedStandardWithdrawalRequestWire) : ℕ :=
 -- Aeneas replaces the `do` notation with a form that has no loops.
 -- This option selects the standard Lean `do` notation for the next definition.
 set_option Aeneas.customDoElab false in
-/-- Make the calls in order, from enclave `initial`.
-Return the last enclave and `signedOut`, the total outflow of the accepted calls. -/
-def applyRequests (initial : Enclave) (requests : List Request) : Result (Enclave × ℕ) := do
+/-- Make the calls in order, from enclave `initial`. Return the last enclave and `signedOut`.
+`signedOut` is the total outflow of the accepted calls with a Guardian clock value in `[a, b]`.
+A call with a clock value out of `[a, b]` is in the run, but not in `signedOut`. -/
+def applyRequests (initial : Enclave) (requests : List Request) (a b : ℕ) :
+    Result (Enclave × ℕ) := do
   let mut enclave := initial
   let mut signedOut : ℕ := 0
   for r in requests do
     let (result, next) ← standard_withdrawal enclave r.wire r.now
     match result with
-    | .Ok _ => signedOut := signedOut + wireOutflow r.wire
+    | .Ok _ =>
+      if a ≤ r.now.val ∧ r.now.val ≤ b then
+        signedOut := signedOut + wireOutflow r.wire
     | .Err _ => pure ()
     enclave := next
   return (enclave, signedOut)
 
-/-- Outflow bound for the handler.
+/-- Outflow bound for the handler, for each window of Guardian clock values.
 
 Start from any enclave `initial`. Make any list of calls to `standard_withdrawal`.
-If each Guardian clock value is in `[a, b]`, then:
-- With no limiter in `initial`, the outflow of the accepted calls is 0.
-- With limiter `l` in `initial`, the outflow of the accepted calls is at most the bucket
-  capacity plus the refill for `b - a + 2100` seconds.
+Take any window `[a, b]`. Count the accepted calls with a clock value in the window:
+- With no limiter in `initial`, their outflow is 0.
+- With limiter `l` in `initial`, their outflow is at most the bucket capacity plus the
+  refill for `b - a + 2100` seconds.
 
+The list can have calls with a clock value out of the window.
+These calls can be before, between, and after the calls in the window.
 Note that we do not assume time monotonically increases between requests.
 -/
 def WithdrawalOutflowBound : Prop :=
   ∀ (initial final : Enclave) (requests : List Request) (a b signedOut : ℕ),
-    (∀ r ∈ requests, a ≤ r.now.val ∧ r.now.val ≤ b) →
-    applyRequests initial requests = ok (final, signedOut) →
+    applyRequests initial requests a b = ok (final, signedOut) →
     match initial.state.rate_limiter with
     | none => signedOut = 0
     | some l =>
