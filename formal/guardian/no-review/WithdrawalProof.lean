@@ -312,16 +312,18 @@ theorem step_none {g g' : Enclave} {wire : guardian.SignedStandardWithdrawalRequ
   · obtain ⟨l, _, hl', _⟩ := consume_ok hconsume
     rw [hl] at hl'; cases hl'
 
-/-- With limiter `l`, one call keeps the run invariant. An accepted call adds its outflow. -/
+/-- With limiter `l`, one call keeps the run invariant.
+An accepted call with a clock value in `[a, b]` adds its outflow. -/
 theorem step_some {l0 l : RateLimiter} {a b spent : ℕ} {g g' : Enclave}
     {wire : guardian.SignedStandardWithdrawalRequestWire} {now : U64}
     {result : core.result.Result _ guardian.errors.GuardianError}
-    (hnow : a ≤ now.val ∧ now.val ≤ b) (hl : g.state.rate_limiter = some l)
+    (hl : g.state.rate_limiter = some l)
     (hinv : RunInv l0 a b l spent) (h : standard_withdrawal g wire now = ok (result, g')) :
     match result with
     | .Err _ => ∃ l', g'.state.rate_limiter = some l' ∧ RunInv l0 a b l' spent
     | .Ok _ => ∃ l', g'.state.rate_limiter = some l' ∧
-        RunInv l0 a b l' (spent + wireOutflow wire) := by
+        RunInv l0 a b l'
+          (if a ≤ now.val ∧ now.val ≤ b then spent + wireOutflow wire else spent) := by
   rcases handler_cases h with ⟨⟨e, rfl⟩, rfl⟩ |
     ⟨_, _, _, amount, _, _, r, es, _, _, _, _, hamount, hskew, hage, hconsume, hcase⟩
   · exact ⟨l, hl, hinv⟩
@@ -330,19 +332,25 @@ theorem step_some {l0 l : RateLimiter} {a b spent : ℕ} {g g' : Enclave}
   · obtain ⟨l1, l', hl1, hat, hl', _⟩ := consume_ok hconsume
     rw [hl] at hl1; cases hl1
     rw [← hamount]
-    exact ⟨l', hl', runInv_accept hnow hskew hage hinv hat⟩
+    refine ⟨l', hl', ?_⟩
+    split
+    · next hnow => exact runInv_accept hnow hskew hage hinv hat
+    · exact runInv_skip hinv hat
 
 /-- The loop of `applyRequests` as a recursive function, from any `signedOut` value. -/
-noncomputable def runRequests (g : Enclave) (signedOut : ℕ) : List Request → Result (Enclave × ℕ)
+noncomputable def runRequests (a b : ℕ) (g : Enclave) (signedOut : ℕ) :
+    List Request → Result (Enclave × ℕ)
   | [] => ok (g, signedOut)
   | r :: rest => do
     let (result, next) ← standard_withdrawal g r.wire r.now
     match result with
-    | .Ok _ => runRequests next (signedOut + wireOutflow r.wire) rest
-    | .Err _ => runRequests next signedOut rest
+    | .Ok _ =>
+      runRequests a b next
+        (if a ≤ r.now.val ∧ r.now.val ≤ b then signedOut + wireOutflow r.wire else signedOut) rest
+    | .Err _ => runRequests a b next signedOut rest
 
-theorem applyRequests_eq (g : Enclave) (requests : List Request) :
-    applyRequests g requests = runRequests g 0 requests := by
+theorem applyRequests_eq (g : Enclave) (requests : List Request) (a b : ℕ) :
+    applyRequests g requests a b = runRequests a b g 0 requests := by
   unfold applyRequests
   generalize (0 : ℕ) = signedOut
   induction requests generalizing g signedOut with
@@ -353,12 +361,15 @@ theorem applyRequests_eq (g : Enclave) (requests : List Request) :
     congr 1
     funext ⟨result, next⟩
     cases result with
-    | Ok response => simpa using ih next (signedOut + wireOutflow r.wire)
+    | Ok response =>
+      by_cases hnow : a ≤ r.now.val ∧ r.now.val ≤ b
+      · simpa [hnow] using ih next (signedOut + wireOutflow r.wire)
+      · simpa [hnow] using ih next signedOut
     | Err e => simpa using ih next signedOut
 
-theorem run_none (requests : List Request) :
+theorem run_none {a b : ℕ} (requests : List Request) :
     ∀ {g final : Enclave} {signedOut : ℕ}, g.state.rate_limiter = none →
-      runRequests g 0 requests = ok (final, signedOut) → signedOut = 0 := by
+      runRequests a b g 0 requests = ok (final, signedOut) → signedOut = 0 := by
   induction requests with
   | nil =>
     intro g final signedOut _ h
@@ -373,36 +384,36 @@ theorem run_none (requests : List Request) :
 
 theorem run_some {l0 : RateLimiter} {a b : ℕ} (requests : List Request) :
     ∀ {g final : Enclave} {l : RateLimiter} {spent signedOut : ℕ},
-      (∀ r ∈ requests, a ≤ r.now.val ∧ r.now.val ≤ b) → g.state.rate_limiter = some l →
-      RunInv l0 a b l spent → runRequests g spent requests = ok (final, signedOut) →
+      g.state.rate_limiter = some l →
+      RunInv l0 a b l spent → runRequests a b g spent requests = ok (final, signedOut) →
       ∃ l', RunInv l0 a b l' signedOut := by
   induction requests with
   | nil =>
-    intro g final l spent signedOut _ _ hinv h
+    intro g final l spent signedOut _ hinv h
     obtain ⟨_, rfl⟩ := Prod.mk.inj (ok_injective h)
     exact ⟨l, hinv⟩
   | cons r rest ih =>
-    intro g final l spent signedOut hclock hl hinv h
-    obtain ⟨hnow, hrest⟩ := List.forall_mem_cons.mp hclock
+    intro g final l spent signedOut hl hinv h
     rw [runRequests] at h
     obtain ⟨⟨result, next⟩, h1, h2⟩ := bind_eq_ok.mp h
-    have hstep := step_some hnow hl hinv h1
+    have hstep := step_some hl hinv h1
     cases result with
     | Err e =>
       obtain ⟨l', hl', hinv'⟩ := hstep
-      exact ih hrest hl' hinv' h2
+      exact ih hl' hinv' h2
     | Ok response =>
       obtain ⟨l', hl', hinv'⟩ := hstep
-      exact ih hrest hl' hinv' h2
+      exact ih hl' hinv' h2
 
 /-- The result. `WithdrawalOutflowBound` is the statement in `WithdrawalSpec.lean`. -/
 theorem withdrawal_outflow_bound : WithdrawalOutflowBound := by
-  intro initial final requests a b signedOut hclock hrun
+  intro initial final requests a b signedOut hrun
   rw [applyRequests_eq] at hrun
   split
   · next hl => exact run_none requests hl hrun
   · next l hl =>
-    obtain ⟨l', hinv⟩ := run_some (l0 := l) requests hclock hl ⟨rfl, Or.inl rfl⟩ hrun
+    obtain ⟨l', hinv⟩ :=
+      run_some (l0 := l) requests hl ⟨rfl, Nat.zero_le _, fun _ => Or.inl rfl⟩ hrun
     exact runInv_bound hinv
 
 #print axioms withdrawal_outflow_bound

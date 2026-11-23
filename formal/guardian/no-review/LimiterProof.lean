@@ -6,8 +6,9 @@ Lean checks this file. It needs no human review.
 
 How it works:
 - `consume_step` gives the two ways in which one `consume` call can end.
-- `RunInv` is the invariant of a run of calls. `runInv_accept` shows that an accepted call
-  keeps it. `runInv_bound` gets the outflow bound from it.
+- `RunInv` is the invariant of a run of calls, for one clock window. `runInv_accept` shows
+  that an accepted call in the window keeps it and adds its amount. `runInv_skip` shows that
+  each other accepted call keeps it. `runInv_bound` gets the outflow bound from it.
 -/
 import HashiGuardian
 open Aeneas Aeneas.Std Result
@@ -109,32 +110,64 @@ theorem consume_step {l l' : RateLimiter} {seq ts amt : U64}
         obtain ⟨rfl, rfl⟩ := h
         refine Or.inr ⟨rfl, hts, rfl, rfl, ?_, ?_⟩ <;> simp only [] <;> omega
 
-/-- Run invariant, from limiter `l0` with each clock value in `[a, b]`.
-`l` is the limiter now, and `spent` is the amount of the accepted calls.
-`t0` is the timestamp of the first accepted call. -/
+/-- Run invariant, from limiter `l0`, for the clock window `[a, b]`. `l` is the limiter now.
+`spent` is the amount of the accepted calls with a clock value in the window. It is at most
+the outflow bound. `t0` is the timestamp of the first such call. The token bound from `t0`
+applies while `last_updated_at ≤ b + 300`. After that, the handler accepts no window call. -/
 def RunInv (l0 : RateLimiter) (a b : ℕ) (l : RateLimiter) (spent : ℕ) : Prop :=
   l.config = l0.config ∧
-  (spent = 0 ∨ ∃ t0, a ≤ t0 + 1800 ∧ t0 ≤ l.state.last_updated_at.val ∧
-    l.state.last_updated_at.val ≤ b + 300 ∧
-    spent + l.state.num_tokens_available.val ≤
-      l0.config.max_bucket_capacity.val +
-        (l.state.last_updated_at.val - t0) * l0.config.refill_rate.val)
+  spent ≤ l0.config.max_bucket_capacity.val + (b - a + 2100) * l0.config.refill_rate.val ∧
+  (l.state.last_updated_at.val ≤ b + 300 →
+    spent = 0 ∨ ∃ t0, a ≤ t0 + 1800 ∧ t0 ≤ l.state.last_updated_at.val ∧
+      spent + l.state.num_tokens_available.val ≤
+        l0.config.max_bucket_capacity.val +
+          (l.state.last_updated_at.val - t0) * l0.config.refill_rate.val)
 
-/-- An accepted `consume` call keeps the run invariant, if its timestamp is near the clock. -/
+/-- An accepted `consume` call in the window keeps the run invariant and adds its amount,
+if its timestamp is near the clock. -/
 theorem runInv_accept {l0 l l' : RateLimiter} {a b spent : ℕ} {now seq ts amt : U64}
     (hnow : a ≤ now.val ∧ now.val ≤ b)
     (hskew : ts.val ≤ now.val + 300) (hage : now.val ≤ ts.val + 1800)
     (hinv : RunInv l0 a b l spent)
     (h : l.consume seq ts amt = ok (.Ok (), l')) : RunInv l0 a b l' (spent + amt.val) := by
-  obtain ⟨hcfg, hinv⟩ := hinv
+  obtain ⟨hcfg, _, hinv⟩ := hinv
   rcases consume_step h with ⟨⟨e, he⟩, _⟩ | ⟨_, hts, hcfg', hlast, hcap, hrefill⟩
   · cases he
-  · refine ⟨hcfg'.trans hcfg, Or.inr ?_⟩
-    rw [hcfg] at hcap hrefill
+  · rw [hcfg] at hcap hrefill
+    have hstep : ∃ t0, a ≤ t0 + 1800 ∧ t0 ≤ ts.val ∧
+        spent + amt.val + l'.state.num_tokens_available.val ≤
+          l0.config.max_bucket_capacity.val + (ts.val - t0) * l0.config.refill_rate.val := by
+      rcases hinv (by omega) with h0 | ⟨t0, ht0, hle, hb⟩
+      · exact ⟨ts.val, by omega, le_refl _, by omega⟩
+      · refine ⟨t0, ht0, by omega, ?_⟩
+        have key : (ts.val - t0) * l0.config.refill_rate.val =
+            (l.state.last_updated_at.val - t0) * l0.config.refill_rate.val +
+            (ts.val - l.state.last_updated_at.val) * l0.config.refill_rate.val := by
+          rw [← Nat.add_mul]; congr 1; omega
+        omega
+    obtain ⟨t0, ht0, hle, hb⟩ := hstep
+    refine ⟨hcfg'.trans hcfg, ?_, fun _ => Or.inr ⟨t0, ht0, ?_, ?_⟩⟩
+    · have := Nat.mul_le_mul_right l0.config.refill_rate.val
+        (show ts.val - t0 ≤ b - a + 2100 by omega)
+      omega
+    · rw [hlast]; exact hle
+    · rw [hlast]; exact hb
+
+/-- An accepted `consume` call keeps the run invariant with the same `spent`.
+The theorem has no clock condition. The proof uses it for a call out of the window. -/
+theorem runInv_skip {l0 l l' : RateLimiter} {a b spent : ℕ} {seq ts amt : U64}
+    (hinv : RunInv l0 a b l spent)
+    (h : l.consume seq ts amt = ok (.Ok (), l')) : RunInv l0 a b l' spent := by
+  obtain ⟨hcfg, hbound, hinv⟩ := hinv
+  rcases consume_step h with ⟨⟨e, he⟩, _⟩ | ⟨_, hts, hcfg', hlast, hcap, hrefill⟩
+  · cases he
+  · rw [hcfg] at hrefill
+    refine ⟨hcfg'.trans hcfg, hbound, ?_⟩
     rw [hlast]
-    rcases hinv with h0 | ⟨t0, ht0, hle, _, hb⟩
-    · exact ⟨ts.val, by omega, le_refl _, by omega, by omega⟩
-    · refine ⟨t0, ht0, by omega, by omega, ?_⟩
+    intro hb
+    rcases hinv (by omega) with h0 | ⟨t0, ht0, hle, hsp⟩
+    · exact Or.inl h0
+    · refine Or.inr ⟨t0, ht0, by omega, ?_⟩
       have key : (ts.val - t0) * l0.config.refill_rate.val =
           (l.state.last_updated_at.val - t0) * l0.config.refill_rate.val +
           (ts.val - l.state.last_updated_at.val) * l0.config.refill_rate.val := by
@@ -143,9 +176,5 @@ theorem runInv_accept {l0 l l' : RateLimiter} {a b spent : ℕ} {now seq ts amt 
 
 /-- The run invariant gives the outflow bound. -/
 theorem runInv_bound {l0 l : RateLimiter} {a b spent : ℕ} (h : RunInv l0 a b l spent) :
-    spent ≤ l0.config.max_bucket_capacity.val + (b - a + 2100) * l0.config.refill_rate.val := by
-  obtain ⟨_, h0 | ⟨t0, ht0, hle, hb, hbound⟩⟩ := h
-  · omega
-  · have := Nat.mul_le_mul_right l0.config.refill_rate.val
-      (show l.state.last_updated_at.val - t0 ≤ b - a + 2100 by omega)
-    omega
+    spent ≤ l0.config.max_bucket_capacity.val + (b - a + 2100) * l0.config.refill_rate.val :=
+  h.2.1
