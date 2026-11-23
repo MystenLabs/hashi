@@ -637,6 +637,15 @@ public(package) fun is_before_previous_committee(self: &CommitteeSet, epoch: u64
     false
 }
 
+public(package) fun committee_epoch_before(self: &CommitteeSet, epoch: u64): Option<u64> {
+    let mut e = epoch;
+    while (e > 0) {
+        e = e - 1;
+        if (self.has_committee(e)) return option::some(e)
+    };
+    option::none()
+}
+
 public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
     if (self.pending_epoch_change.is_some()) {
         option::some(self.pending_epoch_change.borrow().epoch)
