@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REMAINING_SECS","SETTLE_SECS","STOP_REMAINING_SECS"],"fn":["duration","now","require_epoch_window","window"],"struct":["Window"]};

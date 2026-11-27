@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RestoreDecryptor","RestoreSource"],"fn":["export_mpc_public_key","export_mpc_recovery_record","recover_mpc_key","restore","restore_from_remote","save","select_restore_decryptor","test"],"mod":["assemble_cert"],"struct":["RemoteRestoreSource"]};
