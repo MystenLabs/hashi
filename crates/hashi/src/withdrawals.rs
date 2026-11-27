@@ -2336,10 +2336,10 @@ pub enum WithdrawalCommitmentErrorKind {
     NotOldest,
     OverCapacity,
     FailedQuorum,
+    SubmitFailed,
     FeeEstimateFailed,
     UtxoSelectionFailed,
     TimedOut,
-    TaskFailed,
 }
 
 impl RetryPolicy for WithdrawalCommitmentErrorKind {

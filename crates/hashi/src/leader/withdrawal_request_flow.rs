@@ -586,6 +586,7 @@ impl LeaderService {
                             .leader_retries_total
                             .with_label_values(&["withdrawal_commitment", &format!("{kind:?}")])
                             .inc();
+                        retry_tracker.record_failure(kind, checkpoint_timestamp_ms);
                         Err(anyhow::anyhow!(
                             "withdrawal commitment timed out after {LEADER_TASK_TIMEOUT:?}"
                         ))
@@ -731,23 +732,37 @@ impl LeaderService {
         }
 
         // Submit commit_withdrawal_tx to Sui
-        Self::submit_commit_withdrawal_tx(&inner, &approval, signed_approval.committee_signature())
-            .await
-            .inspect(|()| {
-                inner
-                    .metrics
-                    .sui_tx_submissions_total
-                    .with_label_values(&["commit_withdrawal", "success"])
-                    .inc();
-            })
-            .inspect_err(|e| {
-                inner
-                    .metrics
-                    .sui_tx_submissions_total
-                    .with_label_values(&["commit_withdrawal", "failure"])
-                    .inc();
-                error!("Failed to submit commit_withdrawal_tx: {e}");
-            })?;
+        let submitted = Self::submit_commit_withdrawal_tx(
+            &inner,
+            &approval,
+            signed_approval.committee_signature(),
+        )
+        .await
+        .inspect(|()| {
+            inner
+                .metrics
+                .sui_tx_submissions_total
+                .with_label_values(&["commit_withdrawal", "success"])
+                .inc();
+        })
+        .inspect_err(|e| {
+            inner
+                .metrics
+                .sui_tx_submissions_total
+                .with_label_values(&["commit_withdrawal", "failure"])
+                .inc();
+            error!("Failed to submit commit_withdrawal_tx: {e}");
+        });
+        let Ok(()) = submitted else {
+            let kind = WithdrawalCommitmentErrorKind::SubmitFailed;
+            inner
+                .metrics
+                .leader_retries_total
+                .with_label_values(&["withdrawal_commitment", &format!("{kind:?}")])
+                .inc();
+            retry_tracker.record_failure(kind, checkpoint_timestamp_ms);
+            return Ok(());
+        };
         retry_tracker.clear();
 
         Ok(())
