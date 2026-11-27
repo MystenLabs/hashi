@@ -3,7 +3,6 @@
 
 use super::verify_hashi_cert;
 use crate::Enclave;
-use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
@@ -21,27 +20,31 @@ const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
 // Requests are minted per attempt and should not remain usable indefinitely.
 const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
 
+/// Sign one withdrawal. `guardian_now` is the Guardian clock in seconds.
+/// The caller reads the clock, so that the Lean proof can take the clock value as an input.
+/// The parameter name is not `enclave`, because that name collides with a Lean namespace.
 pub async fn standard_withdrawal(
-    enclave: &mut Enclave,
+    guardian: &mut Enclave,
     signed_request: SignedStandardWithdrawalRequestWire,
+    guardian_now: u64,
 ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     info!("/standard_withdrawal - Received request.");
 
-    let network = enclave.config.bitcoin_network()?;
+    let network = guardian.config.bitcoin_network()?;
     let signed_request =
         HashiSigned::<StandardWithdrawalRequest>::validate_addr(signed_request, network)?;
     let wid = *signed_request.message().wid();
     // Add the wid to the RPC span, so each later log line carries it.
     tracing::Span::current().record("wid", tracing::field::display(wid));
     // 0) Validation
-    enclave.require_fully_initialized()?;
+    guardian.require_fully_initialized()?;
 
     // 1) Verify certificate
-    let committee = enclave.state.get_committee()?;
+    let committee = guardian.state.get_committee()?;
 
     debug!("Verifying request certificate.");
     verify_hashi_cert(
-        enclave.config.hashi_object_id()?,
+        guardian.config.hashi_object_id()?,
         committee,
         &signed_request,
     )?;
@@ -51,7 +54,7 @@ pub async fn standard_withdrawal(
 
     // 2) Rate limits: consume tokens. The control lock keeps this consumption
     //    exclusive until it is durably logged or the enclave aborts.
-    validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
+    validate_request_timestamp(request.timestamp_secs(), guardian_now)?;
 
     debug!("Checking rate limits.");
     // Gross outflow (= inputs - change = external_out + miner_fee).
@@ -60,14 +63,14 @@ pub async fn standard_withdrawal(
     let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
     let seq = request.seq();
     let post_state =
-        enclave
+        guardian
             .state
             .consume_from_limiter(seq, request.timestamp_secs(), consumed_amount_sats)?;
     debug!("Rate limit check passed.");
 
     // 3) Sign tx (while holding the control lock)
     debug!("Generating BTC signatures.");
-    let (txid, signatures) = enclave
+    let (txid, signatures) = guardian
         .config
         .btc_sign(request.utxos())
         .expect("All BTC keys should be set");
@@ -85,7 +88,7 @@ pub async fn standard_withdrawal(
         response: response.clone(),
         post_state,
     };
-    enclave
+    guardian
         .log_withdraw(msg)
         .await
         .expect("S3 logger must be initialized to log a withdrawal");
@@ -96,7 +99,7 @@ pub async fn standard_withdrawal(
         tokens_available = post_state.num_tokens_available,
         "Withdrawal signed and logged"
     );
-    Ok(enclave.sign(response))
+    Ok(guardian.sign(response))
 }
 
 fn validate_request_timestamp(
@@ -105,7 +108,10 @@ fn validate_request_timestamp(
 ) -> GuardianResult<()> {
     // Ensure that a compromised hashi committee cannot set an arbitrary time
     // in the future, which in turn allows bypassing the limiter completely.
-    if request_timestamp_secs > guardian_now + MAX_CLOCK_SKEW_SECS {
+    let latest_timestamp_secs = guardian_now
+        .checked_add(MAX_CLOCK_SKEW_SECS)
+        .expect("guardian clock must not overflow");
+    if request_timestamp_secs > latest_timestamp_secs {
         return Err(InvalidInputs(format!(
             "request timestamp {} is too far in the future (guardian clock: {})",
             request_timestamp_secs, guardian_now
@@ -134,6 +140,7 @@ mod tests {
     use hashi_types::bitcoin::BitcoinKeypair;
     use hashi_types::bitcoin::HashiMasterG;
     use hashi_types::bitcoin::BTC_LIB;
+    use hashi_types::guardian::now_timestamp_secs;
     use hashi_types::guardian::EnclaveLifecycle;
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommittee;
@@ -217,7 +224,8 @@ mod tests {
     async fn test_standard_withdrawal_requires_full_init() {
         let mut enclave = Enclave::create_operator_initialized();
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
-        let result = standard_withdrawal(&mut enclave, wire(signed_request)).await;
+        let result =
+            standard_withdrawal(&mut enclave, wire(signed_request), now_timestamp_secs()).await;
         assert!(matches!(
             result,
             Err(GuardianError::LifecycleMismatch {
@@ -247,7 +255,8 @@ mod tests {
         let (mut enclave, _captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
-        let result = standard_withdrawal(&mut enclave, wire(signed_request)).await;
+        let result =
+            standard_withdrawal(&mut enclave, wire(signed_request), now_timestamp_secs()).await;
         assert!(result.is_ok());
     }
 
@@ -272,7 +281,7 @@ mod tests {
             0
         );
 
-        standard_withdrawal(&mut enclave, wire(signed_request))
+        standard_withdrawal(&mut enclave, wire(signed_request), now_timestamp_secs())
             .await
             .expect("withdrawal succeeds");
 
@@ -296,7 +305,7 @@ mod tests {
         let (mut enclave, captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
-        let first = standard_withdrawal(&mut enclave, wire(req1)).await;
+        let first = standard_withdrawal(&mut enclave, wire(req1), now_timestamp_secs()).await;
         assert!(first.is_ok());
 
         // Second withdrawal with seq=1 and later timestamp — bucket is empty, no refill (rate=0).
@@ -306,7 +315,7 @@ mod tests {
             timestamp_secs + 1,
             1,
         );
-        let second = standard_withdrawal(&mut enclave, wire(req2)).await;
+        let second = standard_withdrawal(&mut enclave, wire(req2), now_timestamp_secs()).await;
         assert!(matches!(
             second.unwrap_err(),
             GuardianError::RateLimitExceeded { .. }
@@ -377,7 +386,8 @@ mod tests {
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
         let state_before = enclave.state.limiter_state().expect("activated");
 
-        let result = standard_withdrawal(&mut enclave, wire(signed_request)).await;
+        let result =
+            standard_withdrawal(&mut enclave, wire(signed_request), now_timestamp_secs()).await;
 
         assert!(matches!(
             result,

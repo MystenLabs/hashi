@@ -24,6 +24,7 @@ use crate::withdraw_mode::provisioner_rotate_cert;
 use crate::withdraw_mode::standard_withdrawal;
 use crate::Enclave;
 use crate::HEARTBEAT_INTERVAL;
+use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::AttestedGuardianInfo;
 use hashi_types::guardian::BatchProvisionerInitRequest;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
@@ -178,7 +179,13 @@ impl GuardianService {
         request: SignedStandardWithdrawalRequestWire,
     ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
         self.run_rpc(move |enclave| {
-            Box::pin(standard_withdrawal::standard_withdrawal(enclave, request))
+            // Read the clock here, while this task holds the enclave lock.
+            let guardian_now = now_timestamp_secs();
+            Box::pin(standard_withdrawal::standard_withdrawal(
+                enclave,
+                request,
+                guardian_now,
+            ))
         })
         .await
     }

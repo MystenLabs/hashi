@@ -52,7 +52,9 @@ impl LimiterState {
     /// A timestamp before `last_updated_at` gives no refill.
     pub fn capacity_at(&self, config: &LimiterConfig, timestamp: u64) -> u64 {
         let elapsed = timestamp.saturating_sub(self.last_updated_at);
-        let refilled = elapsed.saturating_mul(config.refill_rate);
+        // Aeneas has no model for `saturating_mul`. This form is equivalent.
+        #[allow(clippy::manual_saturating_arithmetic)]
+        let refilled = elapsed.checked_mul(config.refill_rate).unwrap_or(u64::MAX);
         self.num_tokens_available
             .saturating_add(refilled)
             .min(config.max_bucket_capacity)
@@ -115,7 +117,11 @@ impl RateLimiter {
 
         self.state.last_updated_at = timestamp;
         self.state.num_tokens_available = capacity - amount_sats;
-        self.state.next_seq += 1;
+        self.state.next_seq = self
+            .state
+            .next_seq
+            .checked_add(1)
+            .expect("next_seq must not overflow");
         Ok(())
     }
 }

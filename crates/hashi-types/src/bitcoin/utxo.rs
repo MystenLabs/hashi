@@ -299,6 +299,29 @@ fn validate_address_for_network(
         .map_err(|_| anyhow!("invalid address {:?} for network {}", address, network))
 }
 
+/// Check one output address against `network`. Keep the amount and the output kind.
+fn check_output_address(output: &OutputUTXOWire, network: Network) -> anyhow::Result<OutputUTXO> {
+    Ok(match output {
+        OutputUTXOWire::External(ext) => OutputUTXO::External(ExternalOutputUTXO {
+            address: validate_address_for_network(&ext.address, network)?,
+            amount: ext.amount,
+        }),
+        OutputUTXOWire::Internal(int) => OutputUTXO::Internal(int.clone()),
+    })
+}
+
+/// Check each output address against `network`. Keep the order of the outputs.
+fn check_output_addresses(
+    outputs: &[OutputUTXOWire],
+    network: Network,
+) -> anyhow::Result<Vec<OutputUTXO>> {
+    let mut checked = Vec::with_capacity(outputs.len());
+    for output in outputs.iter() {
+        checked.push(check_output_address(output, network)?);
+    }
+    Ok(checked)
+}
+
 impl TxUTXOs {
     /// Constructs a `TxUTXOs`, validating every invariant in one place: external
     /// output addresses must be valid for `network`, amounts must be non-zero,
@@ -319,45 +342,45 @@ impl TxUTXOs {
 
         // Validate each external address against the network, turning untrusted
         // unchecked addresses into checked ones. Internal outputs carry no address.
-        let mut checked = Vec::with_capacity(outputs.len());
-        for output in outputs {
-            checked.push(match output {
-                OutputUTXOWire::External(ext) => OutputUTXO::External(ExternalOutputUTXO {
-                    address: validate_address_for_network(&ext.address, network)?,
-                    amount: ext.amount,
-                }),
-                OutputUTXOWire::Internal(int) => OutputUTXO::Internal(int),
-            });
-        }
-        let outputs = checked;
+        let outputs = check_output_addresses(&outputs, network)?;
+
+        let tx_info = Self { inputs, outputs };
 
         // Reject zero amounts on both sides: a 0-value input is meaningless and a
         // 0-value output is invalid on Bitcoin.
-        for utxo in &inputs {
-            if utxo.amount == Amount::ZERO {
-                anyhow::bail!("input amount must be > 0");
-            }
-        }
-        for utxo in &outputs {
-            if utxo.amount() == Amount::ZERO {
-                anyhow::bail!("output amount must be > 0");
-            }
-        }
+        tx_info.assert_non_zero_amounts()?;
 
         // Disallow duplicate inputs (same txid,vout), which would result in an invalid transaction.
-        let mut seen_inputs: HashSet<OutPoint> = HashSet::with_capacity(inputs.len());
-        for utxo in &inputs {
-            if !seen_inputs.insert(utxo.outpoint) {
-                anyhow::bail!("duplicate input outpoint: {}", utxo.outpoint);
-            }
-        }
-
-        let tx_info = Self { inputs, outputs };
+        tx_info.assert_unique_inputs()?;
 
         // Enforce the intended invariant: fees > 0.
         tx_info.assert_positive_fees()?;
 
         Ok(tx_info)
+    }
+
+    fn assert_non_zero_amounts(&self) -> anyhow::Result<()> {
+        for utxo in &self.inputs {
+            if utxo.amount == Amount::ZERO {
+                anyhow::bail!("input amount must be > 0");
+            }
+        }
+        for utxo in &self.outputs {
+            if utxo.amount() == Amount::ZERO {
+                anyhow::bail!("output amount must be > 0");
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_unique_inputs(&self) -> anyhow::Result<()> {
+        let mut seen_inputs: HashSet<OutPoint> = HashSet::with_capacity(self.inputs.len());
+        for utxo in &self.inputs {
+            if !seen_inputs.insert(utxo.outpoint) {
+                anyhow::bail!("duplicate input outpoint: {}", utxo.outpoint);
+            }
+        }
+        Ok(())
     }
 
     /// Constructs all outputs (both external and internal).
@@ -379,16 +402,26 @@ impl TxUTXOs {
     /// equivalent to `external outputs + miner_fee`. The amount that consumes
     /// the rate-limiter (miner fee leaves the pool too; change flows back).
     pub fn gross_outflow_amount(&self) -> Amount {
-        let inputs: Amount = self.inputs.iter().map(|i| i.amount).sum();
-        let internal: Amount = self
-            .outputs
-            .iter()
-            .filter_map(|utxo| match utxo {
-                OutputUTXO::Internal(x) => Some(x.amount),
-                OutputUTXO::External(_) => None,
-            })
-            .sum();
-        inputs - internal
+        // Plain loops: Aeneas has no model for the iterator `sum`.
+        // Checked additions: a sum that wraps makes the outflow too small.
+        let mut inputs: u64 = 0;
+        for input in self.inputs.iter() {
+            inputs = inputs
+                .checked_add(input.amount.to_sat())
+                .expect("input amounts must not overflow");
+        }
+        let mut internal: u64 = 0;
+        for output in self.outputs.iter() {
+            if let OutputUTXO::Internal(x) = output {
+                internal = internal
+                    .checked_add(x.amount.to_sat())
+                    .expect("internal output amounts must not overflow");
+            }
+        }
+        let outflow = inputs
+            .checked_sub(internal)
+            .expect("internal outputs must not exceed inputs");
+        Amount::from_sat(outflow)
     }
 
     /// Constructs an unsigned Bitcoin transaction for these UTXOs.
