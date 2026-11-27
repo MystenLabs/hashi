@@ -220,10 +220,7 @@ impl LeaderService {
             .validate_and_sign_withdrawal_request_approval(&approval, trm::Caller::Local)
             .await
         {
-            Ok(sig) => {
-                retry_tracker.clear(&request.id);
-                parse_member_signature(sig).unwrap()
-            }
+            Ok(sig) => parse_member_signature(sig).unwrap(),
             Err(e) => {
                 let kind = e.kind();
                 warn!(error = %e, error_kind = ?kind, "Failed to build withdrawal commitment");
@@ -340,6 +337,7 @@ impl LeaderService {
             .onchain_state()
             .wait_until_checkpoint(checkpoint)
             .await;
+        retry_tracker.clear(&request.id);
         Ok(())
     }
 
@@ -610,15 +608,11 @@ impl LeaderService {
         );
 
         let approval = match build_checked_commitment(&inner, requests).await {
-            Ok(Some(approval)) => {
-                retry_tracker.clear();
-                approval
-            }
+            Ok(Some(approval)) => approval,
             Ok(None) => {
                 info!(
                     "An unsigned withdrawal appeared or the mirror is catching up; skipping this batch"
                 );
-                retry_tracker.clear();
                 return Ok(());
             }
             Err(e) => {
@@ -754,6 +748,7 @@ impl LeaderService {
                     .inc();
                 error!("Failed to submit commit_withdrawal_tx: {e}");
             })?;
+        retry_tracker.clear();
 
         Ok(())
     }
