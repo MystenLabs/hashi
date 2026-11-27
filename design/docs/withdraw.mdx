@@ -65,6 +65,19 @@ graph LR
    after the required confirmations, a committee member calls
    `hashi::withdraw::confirm_withdrawal`.
 
+The following table maps each onchain function to its phase and the actor that calls it:
+
+| **Phase** | **Actor** | **Function** |
+|---|---|---|
+| Request | User | `hashi::withdraw::request_withdrawal` |
+| Request | User (optional) | `hashi::withdraw::cancel_withdrawal` |
+| Approve | Committee member | `hashi::withdraw::approve_request` |
+| Build TX | Leader | `hashi::withdraw::commit_withdrawal_tx` |
+| Sign | Leader | `hashi::withdraw::commit_input_signatures` |
+| Sign | Leader | `hashi::withdraw::finalize_withdrawal` |
+| Broadcast | Committee member | `hashi::withdraw::confirm_withdrawal` |
+| Broadcast | Leader | `hashi::withdraw::archive_confirmed_withdrawals` |
+
 Beyond the request, the user's only optional actions are canceling and, if
 the transaction gets stuck, fee bumping through child pays for parent (CPFP),
 described in [Broadcast](#broadcast).
@@ -204,7 +217,8 @@ can; its owner can cancel it.
 The leader then constructs an unsigned Bitcoin transaction:
 
 1. **Coin selection**: select UTXOs from the pool to cover the total
-   withdrawal amount (the user's withdrawn amount covers the miner fees).
+   withdrawal amount (each user's share of the miner fee comes out of their
+   withdrawn amount, as described in the fee calculation step).
    The coin selector might include extra inputs to opportunistically
    consolidate small UTXOs (see [Fees](fees.mdx)).
 2. **Outputs**: one output per withdrawal request to each user's destination
