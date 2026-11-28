@@ -15,6 +15,8 @@ use anyhow::bail;
 use crate::Ctx;
 use crate::exec::Cmd;
 use crate::exec::read;
+use crate::print_warning;
+use crate::stack::is_hex;
 
 pub struct Tree {
     pub commit: String,
@@ -118,14 +120,16 @@ pub fn resolve(ctx: &Ctx, rev: &str) -> Result<Option<String>> {
 }
 
 /// Stops unless `commit` has the guardian protos and log types of `other`, `whose` build: each guardian must read the
-/// records the other wrote.
+/// records the other wrote. A difference passes only for a pair that `GUARDIAN_FORMATS_REVIEWED` lists.
 pub fn require_same_formats(ctx: &Ctx, commit: &str, other: &str, whose: &str) -> Result<()> {
+    let mut full = Vec::new();
     for rev in [commit, other] {
-        if resolve(ctx, rev)?.is_none() {
+        let Some(resolved) = resolve(ctx, rev)? else {
             bail!(
                 "this checkout does not have {rev}, so it cannot compare {commit} with {whose}; fetch it first"
             );
-        }
+        };
+        full.push(resolved);
     }
     let changed = read(
         ctx.exec,
@@ -134,13 +138,43 @@ pub fn require_same_formats(ctx: &Ctx, commit: &str, other: &str, whose: &str) -
             .args(FORMATS),
     )
     .with_context(|| format!("could not compare {commit} with {other}"))?;
-    if !changed.trim().is_empty() {
-        bail!(
-            "{commit} changes the guardian's protos or log records from {whose}, {other}: {}; a rotation cannot move the key across that without a compatibility review",
-            changed.split_whitespace().collect::<Vec<_>>().join(", ")
-        );
+    if changed.trim().is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let changed = changed.split_whitespace().collect::<Vec<_>>().join(", ");
+    let (commit_full, other_full) = (&full[0], &full[1]);
+    let reviewed = reviewed_pairs(ctx)?.iter().any(|(a, b)| {
+        (a == commit_full && b == other_full) || (a == other_full && b == commit_full)
+    });
+    if reviewed {
+        print_warning(&format!(
+            "{commit} changes the guardian's protos or log records from {whose}, {other}: {changed}; going on, as GUARDIAN_FORMATS_REVIEWED lists this pair as reviewed"
+        ));
+        return Ok(());
+    }
+    bail!(
+        "{commit} changes the guardian's protos or log records from {whose}, {other}: {changed}; a rotation cannot move the key across that without a compatibility review. Once a review finds both builds still read each other's messages and records, add {other_full}..{commit_full} to GUARDIAN_FORMATS_REVIEWED"
+    );
+}
+
+/// The build pairs `GUARDIAN_FORMATS_REVIEWED` lists, each as `<commit>..<commit>` with full commits, in either order.
+fn reviewed_pairs(ctx: &Ctx) -> Result<Vec<(String, String)>> {
+    let Some(text) = ctx.env.get("GUARDIAN_FORMATS_REVIEWED") else {
+        return Ok(Vec::new());
+    };
+    text.split_whitespace()
+        .map(|entry| {
+            entry
+                .split_once("..")
+                .filter(|(a, b)| is_hex(a, 40) && is_hex(b, 40))
+                .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "GUARDIAN_FORMATS_REVIEWED lists {entry}, not <commit>..<commit> with full commits"
+                    )
+                })
+        })
+        .collect()
 }
 
 /// `hashi-guardian-init`, built from the guardian's commit.
@@ -304,6 +338,59 @@ mod tests {
             format!(
                 "this checkout does not have {commit}, the commit slot b's guardian runs; fetch it first"
             )
+        );
+    }
+
+    #[test]
+    fn passes_a_format_difference_only_for_a_reviewed_pair() {
+        let repo = tempfile::tempdir().unwrap();
+        // Every revision resolves to itself, and the builds differ in one guardian type.
+        let exec = Fake::new(|words| match words[3].as_str() {
+            "rev-parse" => Some((true, format!("{}\n", words[6].strip_suffix("^{commit}")?))),
+            "diff" => Some((
+                true,
+                "crates/hashi-types/src/guardian/errors.rs\n".to_owned(),
+            )),
+            _ => None,
+        });
+        let (new, old, third) = ("aa".repeat(20), "bb".repeat(20), "cc".repeat(20));
+        let check = |reviewed: &str| {
+            let ctx = Ctx::for_test(
+                repo.path(),
+                &exec,
+                &[("GUARDIAN_FORMATS_REVIEWED", reviewed)],
+            );
+            require_same_formats(&ctx, &new, &old, "slot b's build").map_err(|e| e.to_string())
+        };
+        let refused = check("").unwrap_err();
+        assert!(
+            refused.starts_with(&format!(
+                "{new} changes the guardian's protos or log records from slot b's build, {old}: crates/hashi-types/src/guardian/errors.rs;"
+            )),
+            "{refused}"
+        );
+        assert!(
+            refused.ends_with(&format!("add {old}..{new} to GUARDIAN_FORMATS_REVIEWED")),
+            "{refused}"
+        );
+        check(&format!("{old}..{new}")).unwrap();
+        check(&format!("{third}..{old} {new}..{old}")).unwrap();
+        // A review of one of the builds against a third covers nothing between these two.
+        assert!(
+            check(&format!("{new}..{third}"))
+                .unwrap_err()
+                .contains("without a compatibility review")
+        );
+        assert_eq!(
+            check(&format!("{new}...{old}")).unwrap_err(),
+            format!(
+                "GUARDIAN_FORMATS_REVIEWED lists {new}...{old}, not <commit>..<commit> with full commits"
+            )
+        );
+        assert!(
+            check(&format!("{}..{old}", &new[..12]))
+                .unwrap_err()
+                .starts_with("GUARDIAN_FORMATS_REVIEWED lists")
         );
     }
 
